@@ -164,6 +164,61 @@ class DNSUtil(object):
         iplist = DNSUtil._reply_to_iplist(data or '')
         return iplist
 
+    @staticmethod
+    def parse_ipv6addr(ipstr):
+        """https://github.com/haypo/python-ipy"""
+        items = []
+        index = 0
+        fill_pos = None
+        while index < len(ipstr):
+            text = ipstr[index:]
+            if text.startswith("::"):
+                if fill_pos is not None:
+                    raise ValueError("%r: Invalid IPv6 address: more than one '::'" % ipstr)
+                fill_pos = len(items)
+                index += 2
+                continue
+            pos = text.find(':')
+            if pos == 0:
+                raise ValueError("%r: Invalid IPv6 address" % ipstr)
+            if pos != -1:
+                items.append(text[:pos])
+                if text[pos:pos+2] == "::":
+                    index += pos
+                else:
+                    index += pos+1
+
+                if index == len(ipstr):
+                    raise ValueError("%r: Invalid IPv6 address" % ipstr)
+            else:
+                items.append(text)
+                break
+        if items and '.' in items[-1]:
+            if (fill_pos is not None) and not (fill_pos <= len(items)-1):
+                raise ValueError("%r: Invalid IPv6 address: '::' after IPv4" % ipstr)
+            value = parseAddress(items[-1])[0]
+            items = items[:-1] + ["%04x" % (value >> 16), "%04x" % (value & 0xffff)]
+        if fill_pos is not None:
+            diff = 8 - len(items)
+            if diff <= 0:
+                raise ValueError("%r: Invalid IPv6 address: '::' is not needed" % ipstr)
+            items = items[:fill_pos] + ['0']*diff + items[fill_pos:]
+        if len(items) != 8:
+            raise ValueError("%r: Invalid IPv6 address: should have 8 hextets" % ipstr)
+        value = 0
+        index = 0
+        for item in items:
+            try:
+                item = int(item, 16)
+                error = not(0 <= item <= 0xffff)
+            except ValueError:
+                error = True
+            if error:
+                raise ValueError("%r: Invalid IPv6 address: invalid hexlet %r" % (ipstr, item))
+            value = (value << 16) + item
+            index += 1
+        return value
+
 
 class DNSServer(gevent.server.DatagramServer):
     """DNS Proxy over TCP to avoid DNS poisoning"""
@@ -182,7 +237,11 @@ class DNSServer(gevent.server.DatagramServer):
         record = '\x81\x80\x00\x01\x00\x01\x00\x00\x00\x00'
         record += domain
         record += '\x00\x00\x01\x00\x01\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\n\x00'
-        record += '\x04' + ''.join(chr(int(x)) for x in ip.split('.'))
+        if ':' in ip:
+            ipint = DNSUtil.parse_ipv6addr(ip)
+            record += '\x10' + struct.pack('!QQ', ipint>>64, ipint&0xFFFFFFFFFFFFFFFF)
+        else:
+            record += '\x04' + ''.join(chr(int(x)) for x in ip.split('.'))
         self.cache[domain] = record
 
     def handle(self, data, address):
@@ -232,7 +291,7 @@ class SNIProxyHandler(object):
         server_name = ''
         try:
             # extrace SNI from ClientHello packet, quick and dirty.
-            server_name = (m for m in re.finditer('\x00\x00(.)([\\w\\.]{4,255})', packet) if ord(m.group(1)) == len(m.group(2))).next().group(2)
+            server_name = (m.group(2) for m in re.finditer('\x00\x00(.)([\\w\\.]{4,255})', packet) if ord(m.group(1)) == len(m.group(2))).next()
         except StopIteration:
             pass
 
@@ -266,7 +325,6 @@ def init_dnsmap(dns_server):
     listen_ip = get_listen_ip()
     for domain in domains:
         dns_server.add_record(domain, listen_ip)
-
 
 def main():
     logging.basicConfig(level=logging.DEBUG, format='%(levelname)s - %(asctime)s %(message)s', datefmt='[%b %d %H:%M:%S]')
