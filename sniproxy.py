@@ -36,7 +36,7 @@ def extract_server_name(packet):
                 return server_name
 
 
-class PortforwardServer(object):
+class SNIProxy(object):
     """Echo server class"""
 
     def __init__(self, host, port, loop=None):
@@ -72,13 +72,14 @@ class PortforwardServer(object):
         server_name = extract_server_name(data)
         logging.info('Attmpt open_connection to {}'.format(server_name))
         remote_reader, remote_writer = yield from asyncio.open_connection(server_name, self._port)
+        remote_writer.write(data)
         asyncio.async(self.io_copy(reader, remote_writer))
         yield from self.io_copy(remote_reader, writer)
 
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG)
-    server = PortforwardServer('127.0.0.1', 443)
+    server = SNIProxy('127.0.0.1', 443)
     try:
         server.start()
     except KeyboardInterrupt:
