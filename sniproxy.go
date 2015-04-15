@@ -22,7 +22,7 @@ func main() {
 	flag.Set("logtostderr", "true")
 	flag.Parse()
 
-	ln, err := net.Listen("tcp", ":"+port)
+	ln, err := net.Listen("tcp4", ":"+port)
 	if err != nil {
 		glog.Fatalf("Listen failed: %v\n", err)
 	}
