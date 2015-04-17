@@ -8,15 +8,11 @@
 # contributor:
 #      Phus Lu        <phus.lu@gmail.com>
 
-import gevent.monkey
-gevent.monkey.patch_all()
-import gevent
-import gevent.server
-
+import asyncio
 import io
 import logging
-import socket
 import struct
+
 
 def extract_server_name(packet):
     if packet.startswith(b'\x16\x03'):
@@ -40,43 +36,54 @@ def extract_server_name(packet):
                 return server_name
 
 
-def io_copy(dest, src, timeout=60, bufsize=8192):
-    """forward socket"""
-    try:
-        while True:
-            data = src.recv(bufsize)
-            if not data:
-                break
-            src.sendall(data)
-    except Exception as ex:
-        logging.exception('io_copy error: %r', ex)
-    finally:
-        for sock in (dest, src):
-            try:
-                sock.close()
-            except Exception:
-                pass
-
-
-class SNIProxy(gevent.server.StreamServer):
+class SNIProxy(object):
     """Echo server class"""
 
-    def __init__(self, *args, **kwargs):
-        gevent.server.StreamServer.__init__(self, *args, **kwargs)
+    def __init__(self, host, port, loop=None):
+        self._loop = loop or asyncio.get_event_loop()
+        self._port = port
+        self._server = asyncio.start_server(self.handle_connection, port=self._port)
 
-    def handle(self, sock, addr):
+    def start(self, and_loop=True):
+        self._server = self._loop.run_until_complete(self._server)
+        logging.info('Listening established on {0}'.format(self._server.sockets[0].getsockname()))
+        if and_loop:
+            self._loop.run_forever()
+
+    def stop(self, and_loop=True):
+        self._server.close()
+        if and_loop:
+            self._loop.close()
+
+    @asyncio.coroutine
+    def io_copy(self, reader, writer):
+        while True:
+            data = yield from reader.read(8192)
+            if not data:
+                break
+            writer.write(data)
+        writer.close()
+
+    @asyncio.coroutine
+    def handle_connection(self, reader, writer):
         peername = writer.get_extra_info('peername')
         logging.info('Accepted connection from {}'.format(peername))
-        data = sock.recv(1500)
+        data = yield from reader.read(1024)
         server_name = extract_server_name(data)
         logging.info('Attmpt open_connection to {}'.format(server_name))
-        remote = socket.create_connection((server_name, 443))
-        remote.sendall(data)
-        gevent.spawn(forward_socket, sock, remote)
-        gevent.spawn(forward_socket, remote, sock)
-
+        remote_reader, remote_writer = yield from asyncio.open_connection(server_name, self._port)
+        remote_writer.write(data)
+        asyncio.async(self.io_copy(reader, remote_writer))
+        yield from self.io_copy(remote_reader, writer)
 
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG)
-    SNIProxy(('127.0.0.1', 443)).serve_forever()
+    server = SNIProxy('127.0.0.1', 443)
+    try:
+        server.start()
+    except KeyboardInterrupt:
+        pass # Press Ctrl+C to stop
+    finally:
+        server.stop()
+
