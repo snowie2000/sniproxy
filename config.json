@@ -1,0 +1,6 @@
+{
+	"Listen":":4450",
+	"tls": [
+		{"name": "localtest.me:4450", "value":"www.baidu.com:443"}
+	]
+}

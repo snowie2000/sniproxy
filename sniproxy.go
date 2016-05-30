@@ -1,28 +1,57 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
-	"github.com/golang/glog"
 	"io"
+	"io/ioutil"
 	"net"
+	"os"
+	"strings"
 	"time"
+
+	"github.com/golang/glog"
 )
 
 const (
-	port                       = "443"
 	extensionServerName uint16 = 0
 )
 
 var (
-	errInvaildClientHello error = errors.New("Invalid TLS ClientHello data")
+	port                  string = "443"
+	errInvaildClientHello error  = errors.New("Invalid TLS ClientHello data")
 )
 
+type host struct {
+	Name  string
+	Value string
+}
+
+type hosts struct {
+	Listen string
+	Tls    []host
+}
+
+var config hosts
+var hostMap map[string]string = make(map[string]string)
+
 func main() {
+	s := "config.json"
 	flag.Set("logtostderr", "true")
+	flag.StringVar(&s, "c", "config.json", "configuration")
 	flag.Parse()
 
-	ln, err := net.Listen("tcp4", ":"+port)
+	if f, err := ioutil.ReadFile(s); err == nil {
+		json.Unmarshal(f, &config)
+		for _, h := range config.Tls {
+			hostMap[strings.ToLower(h.Name)] = h.Value
+		}
+	} else {
+		os.Exit(-1)
+	}
+	ln, err := net.Listen("tcp4", config.Listen)
+	_, port, _ = net.SplitHostPort(config.Listen)
 	if err != nil {
 		glog.Fatalf("Listen failed: %v\n", err)
 	}
@@ -65,6 +94,16 @@ func serve(c net.Conn) {
 	glog.Infof("extractSNI get %v", host)
 
 	raddr := net.JoinHostPort(host, port)
+	if n, ok := hostMap[raddr]; ok {
+		glog.Infof("%s ==> %s", raddr, n)
+		raddr = n
+	} else {
+		if n, ok := hostMap[host]; ok {
+			glog.Infof("%s ==> %s", host, n)
+			raddr = net.JoinHostPort(n, port)
+		}
+	}
+
 	rc, err := net.Dial("tcp", raddr)
 	if err != nil {
 		glog.Warningf("Dial %v error: %v\n", raddr, err)
@@ -173,5 +212,5 @@ func extractSNI(data []byte) (host string, err error) {
 		}
 		data = data[length:]
 	}
-	return serverName, nil
+	return strings.ToLower(serverName), nil
 }
