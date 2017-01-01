@@ -8,6 +8,7 @@ import (
 	"io/ioutil"
 	"net"
 	"os"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -70,13 +71,14 @@ func main() {
 
 func serve(c net.Conn) {
 	glog.Infof("Handle connection %v\n", c.RemoteAddr())
+	defer debug.FreeOSMemory()
 	defer c.Close()
 
 	var err error
 
 	b := make([]byte, 1024)
 	n, err := c.Read(b)
-	if err != nil {
+	if err != nil || n < 47 {
 		glog.Warningf("Read error: %v\n", err)
 		return
 	}
