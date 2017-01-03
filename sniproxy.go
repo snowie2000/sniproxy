@@ -10,6 +10,7 @@ import (
 	"os"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang/glog"
@@ -77,8 +78,9 @@ func serve(c net.Conn) {
 	var err error
 
 	b := make([]byte, 1024)
-	n, err := c.Read(b)
-	if err != nil || n < 47 {
+	c.SetReadDeadline(time.Now().Add(time.Second * 30))
+	n, err := io.ReadAtLeast(c, b, 48)
+	if err != nil {
 		glog.Warningf("Read error: %v\n", err)
 		return
 	}
@@ -119,8 +121,11 @@ func serve(c net.Conn) {
 		return
 	}
 
-	go io.Copy(c, rc)
-	io.Copy(rc, c)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go tunnel(c, rc, wg)
+	go tunnel(rc, c, wg)
+	wg.Wait()
 }
 
 // https://github.com/golang/go/blob/master/src/crypto/tls/handshake_messages.go
@@ -215,4 +220,12 @@ func extractSNI(data []byte) (host string, err error) {
 		data = data[length:]
 	}
 	return strings.ToLower(serverName), nil
+}
+
+func tunnel(dst io.WriteCloser, src io.Reader, wg sync.WaitGroup) {
+	defer dst.Close()
+	if _, err := io.Copy(dst, src); err != nil {
+		glog.Infof("Connection close %v\n", err.Error())
+	}
+	wg.Done()
 }
