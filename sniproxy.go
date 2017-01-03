@@ -7,6 +7,8 @@ import (
 	"io"
 	"io/ioutil"
 	"net"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"runtime/debug"
 	"strings"
@@ -43,6 +45,9 @@ func main() {
 	flag.Set("logtostderr", "true")
 	flag.StringVar(&s, "c", "config.json", "configuration")
 	flag.Parse()
+
+	//enable pprof
+	go http.ListenAndServe("localhost:6060", nil)
 
 	if f, err := ioutil.ReadFile(s); err == nil {
 		json.Unmarshal(f, &config)
@@ -123,8 +128,8 @@ func serve(c net.Conn) {
 
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go tunnel(c, rc, wg)
-	go tunnel(rc, c, wg)
+	go tunnel(c, rc, &wg)
+	go tunnel(rc, c, &wg)
 	wg.Wait()
 }
 
@@ -222,7 +227,7 @@ func extractSNI(data []byte) (host string, err error) {
 	return strings.ToLower(serverName), nil
 }
 
-func tunnel(dst io.WriteCloser, src io.Reader, wg sync.WaitGroup) {
+func tunnel(dst io.WriteCloser, src io.Reader, wg *sync.WaitGroup) {
 	defer dst.Close()
 	if _, err := io.Copy(dst, src); err != nil {
 		glog.Infof("Connection close %v\n", err.Error())
