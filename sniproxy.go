@@ -10,7 +10,6 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
-	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -77,7 +76,6 @@ func main() {
 
 func serve(c net.Conn) {
 	glog.Infof("Handle connection %v\n", c.RemoteAddr())
-	defer debug.FreeOSMemory()
 	defer c.Close()
 
 	var err error
@@ -230,7 +228,7 @@ func extractSNI(data []byte) (host string, err error) {
 func tunnel(dst io.WriteCloser, src io.Reader, wg *sync.WaitGroup) {
 	defer dst.Close()
 	if _, err := io.Copy(dst, src); err != nil {
-		glog.Infof("Connection close %v\n", err.Error())
+		//glog.Infof("Connection close %v\n", err.Error())
 	}
 	wg.Done()
 }
