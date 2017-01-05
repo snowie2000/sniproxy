@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"net"
@@ -39,6 +40,40 @@ type hosts struct {
 var config hosts
 var hostMap map[string]string = make(map[string]string)
 
+type bufpool struct {
+	p     chan []byte
+	count int
+}
+
+func (this *bufpool) Get() []byte {
+	var r []byte
+	select {
+	case r = <-this.p:
+	default:
+		{
+			r = make([]byte, 32*1024)
+			this.count++
+		}
+	}
+	return r
+}
+
+func (this *bufpool) Put(b []byte) {
+	select {
+	case this.p <- b:
+	default:
+	}
+}
+
+func NewPool() *bufpool {
+	return &bufpool{
+		p:     make(chan []byte, 400),
+		count: 0,
+	}
+}
+
+var g_pool *bufpool = NewPool()
+
 func main() {
 	s := "config.json"
 	flag.Set("logtostderr", "true")
@@ -46,6 +81,7 @@ func main() {
 	flag.Parse()
 
 	//enable pprof
+	http.HandleFunc("/status", PrintStatus)
 	go http.ListenAndServe("localhost:6060", nil)
 
 	if f, err := ioutil.ReadFile(s); err == nil {
@@ -80,7 +116,9 @@ func serve(c net.Conn) {
 
 	var err error
 
-	b := make([]byte, 1024)
+	bx := g_pool.Get()
+	defer g_pool.Put(bx)
+	b := bx
 	c.SetReadDeadline(time.Now().Add(time.Second * 30))
 	n, err := io.ReadAtLeast(c, b, 48)
 	if err != nil {
@@ -226,9 +264,31 @@ func extractSNI(data []byte) (host string, err error) {
 }
 
 func tunnel(dst io.WriteCloser, src io.Reader, wg *sync.WaitGroup) {
+	defer wg.Done()
 	defer dst.Close()
-	if _, err := io.Copy(dst, src); err != nil {
-		//glog.Infof("Connection close %v\n", err.Error())
+	bx := g_pool.Get()
+	defer g_pool.Put(bx)
+
+	buf := bx
+	var (
+		n   int
+		err error
+	)
+	for {
+		if n, err = src.Read(buf); err != nil {
+			if n != 0 {
+				dst.Write(buf[:n])
+			}
+			return
+		} else {
+			dst.Write(buf[:n])
+		}
 	}
-	wg.Done()
+
+}
+
+func PrintStatus(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+	w.WriteHeader(200)
+	w.Write([]byte(fmt.Sprintf("make count = %d\n", g_pool.count)))
 }
