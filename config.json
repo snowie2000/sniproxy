@@ -1,6 +1,7 @@
 {
-	"Listen":":4450",
+	"Listen":":443",
 	"tls": [
-		{"name": "localtest.me:4450", "value":"www.baidu.com:443"}
+		{"name": "gate.mactype.net", "value":"127.0.0.1:4443"},
+		{"name": "home.mactype.net", "value":"127.0.0.1:992"}
 	]
 }

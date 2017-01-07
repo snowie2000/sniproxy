@@ -87,8 +87,13 @@ func main() {
 
 	if f, err := ioutil.ReadFile(s); err == nil {
 		json.Unmarshal(f, &config)
+		var ip string
 		for _, h := range config.Tls {
-			hostMap[strings.ToLower(h.Name)] = h.Value
+			ip = h.Value
+			_, _, err := net.SplitHostPort(ip)
+			if err == nil {
+				hostMap[strings.ToLower(h.Name)] = h.Value
+			}
 		}
 	} else {
 		os.Exit(-1)
@@ -145,15 +150,9 @@ func serve(c net.Conn) {
 	if host == "" {
 		raddr = config.Default
 	} else {
-		raddr = net.JoinHostPort(host, port)
-		if n, ok := hostMap[raddr]; ok {
-			glog.Infof("%s ==> %s", raddr, n)
+		if n, ok := hostMap[host]; ok {
+			glog.Infof("%s ==> %s", host, n)
 			raddr = n
-		} else {
-			if n, ok := hostMap[host]; ok {
-				glog.Infof("%s ==> %s", host, n)
-				raddr = net.JoinHostPort(n, port)
-			}
 		}
 	}
 
@@ -289,7 +288,9 @@ func tunnel(dst io.WriteCloser, src io.Reader, wg *sync.WaitGroup) {
 			}
 			return
 		} else {
-			dst.Write(buf[:n])
+			if _, err = dst.Write(buf[:n]); err != nil {
+				return
+			}
 		}
 	}
 
