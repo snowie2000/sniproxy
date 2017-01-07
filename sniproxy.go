@@ -33,8 +33,9 @@ type host struct {
 }
 
 type hosts struct {
-	Listen string
-	Tls    []host
+	Listen  string
+	Tls     []host
+	Default string
 }
 
 var config hosts
@@ -134,18 +135,25 @@ func serve(c net.Conn) {
 	}
 	if host == "" {
 		glog.Infof("extractSNI return empty host name")
-		return
+		if config.Default == "" {
+			return
+		}
 	}
 	glog.Infof("extractSNI get %v", host)
 
-	raddr := net.JoinHostPort(host, port)
-	if n, ok := hostMap[raddr]; ok {
-		glog.Infof("%s ==> %s", raddr, n)
-		raddr = n
+	var raddr string
+	if host == "" {
+		raddr = config.Default
 	} else {
-		if n, ok := hostMap[host]; ok {
-			glog.Infof("%s ==> %s", host, n)
-			raddr = net.JoinHostPort(n, port)
+		raddr = net.JoinHostPort(host, port)
+		if n, ok := hostMap[raddr]; ok {
+			glog.Infof("%s ==> %s", raddr, n)
+			raddr = n
+		} else {
+			if n, ok := hostMap[host]; ok {
+				glog.Infof("%s ==> %s", host, n)
+				raddr = net.JoinHostPort(n, port)
+			}
 		}
 	}
 
