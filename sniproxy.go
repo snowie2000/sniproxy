@@ -132,6 +132,7 @@ func serve(c net.Conn) {
 		return
 	}
 	b = b[:n]
+	c.SetReadDeadline(time.Time{}) //disable timeout
 
 	host, err := extractSNI(b)
 	if err != nil {
