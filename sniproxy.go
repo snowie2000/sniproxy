@@ -11,6 +11,7 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -76,15 +77,19 @@ func NewPool() *bufpool {
 var g_pool *bufpool = NewPool()
 
 func main() {
-	s := "config.json"
+	s := ""
 	flag.Set("logtostderr", "true")
-	flag.StringVar(&s, "c", "config.json", "configuration")
+	flag.StringVar(&s, "c", "", "configuration")
 	flag.Parse()
 
 	//enable pprof
 	http.HandleFunc("/status", PrintStatus)
 	go http.ListenAndServe("localhost:6060", nil)
 
+	if s == "" {
+		p, _ := filepath.Abs(filepath.Dir(os.Args[0]))
+		s = p + string(os.PathSeparator) + "config.json"
+	}
 	if f, err := ioutil.ReadFile(s); err == nil {
 		json.Unmarshal(f, &config)
 		var ip string
