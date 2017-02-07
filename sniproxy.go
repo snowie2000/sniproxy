@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"mapset"
 	"net"
 	"net/http"
 	_ "net/http/pprof"
@@ -24,8 +25,9 @@ const (
 )
 
 var (
-	port                  string = "443"
-	errInvaildClientHello error  = errors.New("Invalid TLS ClientHello data")
+	port                  string     = "443"
+	errInvaildClientHello error      = errors.New("Invalid TLS ClientHello data")
+	randset               mapset.Set = mapset.NewSet()
 )
 
 type host struct {
@@ -139,7 +141,13 @@ func serve(c net.Conn) {
 	b = b[:n]
 	c.SetReadDeadline(time.Time{}) //disable timeout
 
-	host, err := extractSNI(b)
+	host, rand, err := extractSNI(b)
+	if randset.Contains(rand) {
+		glog.Errorf("Dead loop detected!")
+		return
+	}
+	randset.Add(rand)
+	defer randset.Remove(rand)
 	if err != nil {
 		glog.Warningf("extractSNI error: %v\n", err)
 		return
@@ -183,39 +191,39 @@ func serve(c net.Conn) {
 }
 
 // https://github.com/golang/go/blob/master/src/crypto/tls/handshake_messages.go
-func extractSNI(data []byte) (host string, err error) {
+func extractSNI(data []byte) (host string, rand string, err error) {
 	if !(data[0] == 0x16 && data[1] == 0x3) {
-		return "", errInvaildClientHello
+		return "", "", errInvaildClientHello
 	}
 	data = data[5:]
 
 	if len(data) < 42 {
-		return "", errInvaildClientHello
+		return "", "", errInvaildClientHello
 	}
-
+	rand = string(data[6:38])
 	sessionIdLen := int(data[38])
 	if sessionIdLen > 32 || len(data) < 39+sessionIdLen {
-		return "", errInvaildClientHello
+		return "", "", errInvaildClientHello
 	}
 
 	// sessionId = data[39 : 39+sessionIdLen]
 	data = data[39+sessionIdLen:]
 	if len(data) < 2 {
-		return "", errInvaildClientHello
+		return "", "", errInvaildClientHello
 	}
 	// cipherSuiteLen is the number of bytes of cipher suite numbers. Since
 	// they are uint16s, the number must be even.
 	cipherSuiteLen := int(data[0])<<8 | int(data[1])
 	if cipherSuiteLen%2 == 1 || len(data) < 2+cipherSuiteLen {
-		return "", errInvaildClientHello
+		return "", "", errInvaildClientHello
 	}
 	data = data[2+cipherSuiteLen:]
 	if len(data) < 1 {
-		return "", errInvaildClientHello
+		return "", "", errInvaildClientHello
 	}
 	compressionMethodsLen := int(data[0])
 	if len(data) < 1+compressionMethodsLen {
-		return "", errInvaildClientHello
+		return "", "", errInvaildClientHello
 	}
 
 	data = data[1+compressionMethodsLen:]
@@ -224,45 +232,45 @@ func extractSNI(data []byte) (host string, err error) {
 
 	if len(data) == 0 {
 		// ClientHello is optionally followed by extension data
-		return "", nil
+		return "", rand, nil
 	}
 	if len(data) < 2 {
-		return "", errInvaildClientHello
+		return "", "", errInvaildClientHello
 	}
 
 	extensionsLength := int(data[0])<<8 | int(data[1])
 	data = data[2:]
 	if extensionsLength != len(data) {
-		return "", errInvaildClientHello
+		return "", "", errInvaildClientHello
 	}
 
 	for len(data) != 0 {
 		if len(data) < 4 {
-			return "", errInvaildClientHello
+			return "", "", errInvaildClientHello
 		}
 		extension := uint16(data[0])<<8 | uint16(data[1])
 		length := int(data[2])<<8 | int(data[3])
 		data = data[4:]
 		if len(data) < length {
-			return "", errInvaildClientHello
+			return "", "", errInvaildClientHello
 		}
 
 		switch extension {
 		case extensionServerName:
 			if length < 2 {
-				return "", errInvaildClientHello
+				return "", "", errInvaildClientHello
 			}
 			numNames := int(data[0])<<8 | int(data[1])
 			d := data[2:]
 			for i := 0; i < numNames; i++ {
 				if len(d) < 3 {
-					return "", errInvaildClientHello
+					return "", "", errInvaildClientHello
 				}
 				nameType := d[0]
 				nameLen := int(d[1])<<8 | int(d[2])
 				d = d[3:]
 				if len(d) < nameLen {
-					return "", errInvaildClientHello
+					return "", "", errInvaildClientHello
 				}
 				if nameType == 0 {
 					serverName = string(d[0:nameLen])
@@ -273,7 +281,7 @@ func extractSNI(data []byte) (host string, err error) {
 		}
 		data = data[length:]
 	}
-	return strings.ToLower(serverName), nil
+	return strings.ToLower(serverName), rand, nil
 }
 
 func tunnel(dst io.WriteCloser, src io.Reader, wg *sync.WaitGroup) {
