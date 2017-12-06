@@ -39,6 +39,7 @@ type hosts struct {
 	Listen  string
 	Tls     []host
 	Default string
+	Acme    string
 }
 
 var config hosts
@@ -167,6 +168,14 @@ func serve(c net.Conn) {
 		if n, ok := hostMap[host]; ok {
 			glog.Infof("%s ==> %s", host, n)
 			raddr = n
+		} else {
+			if strings.HasSuffix(host, ".acme.invalid") && config.Acme != "" {
+				raddr = config.Acme
+				glog.Infof("Acme challenge found")
+			} else {
+				glog.Warningf(host, "has no match record")
+				return
+			}
 		}
 	}
 
