@@ -10,7 +10,6 @@ import (
 	"mapset"
 	"net"
 	"net/http"
-	_ "net/http/pprof"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,6 +21,7 @@ import (
 
 const (
 	extensionServerName uint16 = 0
+	KeepAliveTime              = 60 * time.Second
 )
 
 var (
@@ -79,6 +79,46 @@ func NewPool() *bufpool {
 
 var g_pool *bufpool = NewPool()
 
+// tcpKeepAliveListener wraps a TCPListener to
+// activate TCP keep alive on every accepted connection
+type tcpKeepAliveListener struct {
+	// inner TCPlistener
+	*net.TCPListener
+
+	// interval between keep alives to set on accepted conns
+	keepAliveInterval time.Duration
+}
+
+// Accept a TCP Conn and enable TCP keep alive
+func (ln tcpKeepAliveListener) Accept() (c net.Conn, err error) {
+	tc, err := ln.AcceptTCP()
+	if err != nil {
+		return
+	}
+	err = tc.SetKeepAlive(true)
+	if err != nil {
+		return
+	}
+	err = tc.SetKeepAlivePeriod(ln.keepAliveInterval)
+	if err != nil {
+		return
+	}
+	return tc, nil
+}
+
+// TCPListener creates a Listener for TCP proxy server.
+func TCPListener(addr string) (net.Listener, error) {
+	laddr, err := net.ResolveTCPAddr("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	ln, err := net.ListenTCP("tcp", laddr)
+	if err != nil {
+		return nil, err
+	}
+	return &tcpKeepAliveListener{ln, KeepAliveTime}, nil
+}
+
 func main() {
 	s := ""
 	flag.Set("logtostderr", "true")
@@ -86,8 +126,8 @@ func main() {
 	flag.Parse()
 
 	//enable pprof
-	http.HandleFunc("/status", PrintStatus)
-	go http.ListenAndServe("localhost:6060", nil)
+	//http.HandleFunc("/status", PrintStatus)
+	//go http.ListenAndServe("localhost:6060", nil)
 
 	if s == "" {
 		p, _ := filepath.Abs(filepath.Dir(os.Args[0]))
@@ -106,7 +146,7 @@ func main() {
 	} else {
 		os.Exit(-1)
 	}
-	ln, err := net.Listen("tcp4", config.Listen)
+	ln, err := TCPListener(config.Listen)
 	_, port, _ = net.SplitHostPort(config.Listen)
 	if err != nil {
 		glog.Fatalf("Listen failed: %v\n", err)
