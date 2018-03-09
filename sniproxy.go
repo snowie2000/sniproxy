@@ -27,6 +27,7 @@ const (
 var (
 	port                  string     = "443"
 	errInvaildClientHello error      = errors.New("Invalid TLS ClientHello data")
+	errNoEnoughData       error      = errors.New("Insufficient data provided")
 	randset               mapset.Set = mapset.NewSet()
 )
 
@@ -40,6 +41,40 @@ type hosts struct {
 	Tls     []host
 	Default string
 	Acme    string
+}
+
+type buferror struct {
+	required int
+	err      error
+}
+
+type dataProducer struct {
+	l      int
+	rawbuf []byte
+	outbuf []byte
+	c      net.Conn
+}
+
+func (this *dataProducer) Ensure(nLen int) ([]byte, error) {
+	if nLen > len(this.rawbuf) {
+		return nil, errors.New("Buffer underrun")
+	}
+	if this.l >= nLen {
+		return this.rawbuf[:this.l], nil
+	} else {
+		this.c.SetReadDeadline(time.Now().Add(time.Second * 30))
+		size, err := io.ReadAtLeast(this.c, this.rawbuf[this.l:], nLen-this.l)
+		if err != nil {
+			return nil, err
+		} else {
+			this.l += size
+			return this.rawbuf[:this.l], nil
+		}
+	}
+}
+
+func (this *dataProducer) Bytes() []byte {
+	return this.rawbuf[:this.l]
 }
 
 var config hosts
@@ -172,17 +207,36 @@ func serve(c net.Conn) {
 
 	bx := g_pool.Get()
 	defer g_pool.Put(bx)
-	b := bx
-	c.SetReadDeadline(time.Now().Add(time.Second * 30))
-	n, err := io.ReadAtLeast(c, b, 48)
+
+	reader := &dataProducer{
+		rawbuf: bx,
+		c:      c,
+	}
+	_, err = reader.Ensure(42)
 	if err != nil {
 		glog.Warningf("Read error: %v\n", err)
 		return
 	}
-	b = b[:n]
+	//glog.Infoln("Got something", b[:n])
+	var (
+		host     string
+		rand     string
+		required int
+	)
+	for {
+		host, rand, err, required = extractSNI(reader.Bytes())
+		if err == errNoEnoughData && required > 0 {
+			if _, err = reader.Ensure(required); err == nil {
+				continue
+			}
+		}
+		if err != nil {
+			glog.Errorln("Error while extracing SNI", err)
+			return
+		}
+		break
+	}
 	c.SetReadDeadline(time.Time{}) //disable timeout
-
-	host, rand, err := extractSNI(b)
 	if randset.Contains(rand) {
 		glog.Errorf("Dead loop detected!")
 		return
@@ -213,7 +267,7 @@ func serve(c net.Conn) {
 				raddr = config.Acme
 				glog.Infof("Acme challenge found")
 			} else {
-				glog.Warningf(host, "has no match record")
+				glog.Warningln(host, "has no match record")
 				return
 			}
 		}
@@ -226,7 +280,7 @@ func serve(c net.Conn) {
 	}
 	defer rc.Close()
 
-	_, err = rc.Write(b)
+	_, err = rc.Write(reader.Bytes())
 	if err != nil {
 		glog.Warningf("Write %v error: %v\n", rc, err)
 		return
@@ -240,40 +294,58 @@ func serve(c net.Conn) {
 }
 
 // https://github.com/golang/go/blob/master/src/crypto/tls/handshake_messages.go
-func extractSNI(data []byte) (host string, rand string, err error) {
+func extractSNI(data []byte) (host string, rand string, err error, requiredLen int) {
 	if !(data[0] == 0x16 && data[1] == 0x3) {
-		return "", "", errInvaildClientHello
+		return "", "", errInvaildClientHello, 0
+	}
+	initialSize := len(data)
+	defer func() {
+		if e := recover(); e != nil {
+			if s, ok := e.(*buferror); ok && s.err == errNoEnoughData {
+				err = errNoEnoughData
+				requiredLen = s.required
+			} else {
+				glog.Errorln("Unknown error:", e)
+			}
+		}
+	}()
+	checkBuf := func(r int) {
+		if r > len(data) {
+			panic(&buferror{
+				err:      errNoEnoughData,
+				required: r - len(data) + initialSize,
+			})
+		}
 	}
 	data = data[5:]
 
 	if len(data) < 42 {
-		return "", "", errInvaildClientHello
+		return "", "", errNoEnoughData, 47
 	}
 	rand = string(data[6:38])
 	sessionIdLen := int(data[38])
-	if sessionIdLen > 32 || len(data) < 39+sessionIdLen {
-		return "", "", errInvaildClientHello
+	checkBuf(41 + sessionIdLen)
+	if sessionIdLen > 32 {
+		return "", "", errInvaildClientHello, 0
 	}
 
 	// sessionId = data[39 : 39+sessionIdLen]
 	data = data[39+sessionIdLen:]
 	if len(data) < 2 {
-		return "", "", errInvaildClientHello
+		return "", "", errInvaildClientHello, 0
 	}
 	// cipherSuiteLen is the number of bytes of cipher suite numbers. Since
 	// they are uint16s, the number must be even.
 	cipherSuiteLen := int(data[0])<<8 | int(data[1])
-	if cipherSuiteLen%2 == 1 || len(data) < 2+cipherSuiteLen {
-		return "", "", errInvaildClientHello
+	checkBuf(2 + cipherSuiteLen)
+	if cipherSuiteLen%2 == 1 {
+		return "", "", errInvaildClientHello, 0
 	}
 	data = data[2+cipherSuiteLen:]
-	if len(data) < 1 {
-		return "", "", errInvaildClientHello
-	}
+	checkBuf(1)
+
 	compressionMethodsLen := int(data[0])
-	if len(data) < 1+compressionMethodsLen {
-		return "", "", errInvaildClientHello
-	}
+	checkBuf(1 + compressionMethodsLen)
 
 	data = data[1+compressionMethodsLen:]
 
@@ -281,56 +353,47 @@ func extractSNI(data []byte) (host string, rand string, err error) {
 
 	if len(data) == 0 {
 		// ClientHello is optionally followed by extension data
-		return "", rand, nil
+		return "", rand, nil, 0
 	}
-	if len(data) < 2 {
-		return "", "", errInvaildClientHello
-	}
-
+	checkBuf(2)
 	extensionsLength := int(data[0])<<8 | int(data[1])
 	data = data[2:]
-	if extensionsLength != len(data) {
-		return "", "", errInvaildClientHello
-	}
+	checkBuf(extensionsLength)
 
-	for len(data) != 0 {
-		if len(data) < 4 {
-			return "", "", errInvaildClientHello
-		}
+	for extensionsLength > 0 {
+		checkBuf(4)
+
 		extension := uint16(data[0])<<8 | uint16(data[1])
 		length := int(data[2])<<8 | int(data[3])
 		data = data[4:]
-		if len(data) < length {
-			return "", "", errInvaildClientHello
-		}
+		checkBuf(length)
 
+		d := data
 		switch extension {
 		case extensionServerName:
 			if length < 2 {
-				return "", "", errInvaildClientHello
+				return "", "", errInvaildClientHello, 0
 			}
 			numNames := int(data[0])<<8 | int(data[1])
-			d := data[2:]
+			data := data[2:]
 			for i := 0; i < numNames; i++ {
-				if len(d) < 3 {
-					return "", "", errInvaildClientHello
-				}
-				nameType := d[0]
-				nameLen := int(d[1])<<8 | int(d[2])
-				d = d[3:]
-				if len(d) < nameLen {
-					return "", "", errInvaildClientHello
-				}
+				checkBuf(3)
+
+				nameType := data[0]
+				nameLen := int(data[1])<<8 | int(data[2])
+				data = data[3:]
+				checkBuf(nameLen)
 				if nameType == 0 {
-					serverName = string(d[0:nameLen])
+					serverName = string(data[0:nameLen])
 					break
 				}
-				d = d[nameLen:]
+				data = data[nameLen:]
 			}
 		}
-		data = data[length:]
+		data = d[length:]
+		extensionsLength -= length + 4
 	}
-	return strings.ToLower(serverName), rand, nil
+	return strings.ToLower(serverName), rand, nil, 0
 }
 
 func tunnel(dst io.WriteCloser, src io.Reader, wg *sync.WaitGroup) {
