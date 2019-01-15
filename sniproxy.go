@@ -91,7 +91,7 @@ func (this *bufpool) Get() []byte {
 	case r = <-this.p:
 	default:
 		{
-			r = make([]byte, 32*1024)
+			r = make([]byte, 512*1024)
 			this.count++
 		}
 	}
@@ -403,23 +403,7 @@ func tunnel(dst io.WriteCloser, src io.Reader, wg *sync.WaitGroup) {
 	defer g_pool.Put(bx)
 
 	buf := bx
-	var (
-		n   int
-		err error
-	)
-	for {
-		if n, err = src.Read(buf); err != nil {
-			if n != 0 {
-				dst.Write(buf[:n])
-			}
-			return
-		} else {
-			if _, err = dst.Write(buf[:n]); err != nil {
-				return
-			}
-		}
-	}
-
+	io.CopyBuffer(dst, src, buf)
 }
 
 func PrintStatus(w http.ResponseWriter, r *http.Request) {
