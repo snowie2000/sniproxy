@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
-	"fmt"
 	"io"
 	"io/ioutil"
 	"mapset"
@@ -80,39 +79,11 @@ func (this *dataProducer) Bytes() []byte {
 var config hosts
 var hostMap map[string]string = make(map[string]string)
 
-type bufpool struct {
-	p     chan []byte
-	count int
+var g_pool sync.Pool = sync.Pool{
+	New: func() interface{} {
+		return make([]byte, 512*1024)
+	},
 }
-
-func (this *bufpool) Get() []byte {
-	var r []byte
-	select {
-	case r = <-this.p:
-	default:
-		{
-			r = make([]byte, 512*1024)
-			this.count++
-		}
-	}
-	return r
-}
-
-func (this *bufpool) Put(b []byte) {
-	select {
-	case this.p <- b:
-	default:
-	}
-}
-
-func NewPool() *bufpool {
-	return &bufpool{
-		p:     make(chan []byte, 400),
-		count: 0,
-	}
-}
-
-var g_pool *bufpool = NewPool()
 
 // tcpKeepAliveListener wraps a TCPListener to
 // activate TCP keep alive on every accepted connection
@@ -205,7 +176,7 @@ func serve(c net.Conn) {
 
 	var err error
 
-	bx := g_pool.Get()
+	bx := g_pool.Get().([]byte)
 	defer g_pool.Put(bx)
 
 	reader := &dataProducer{
@@ -399,15 +370,11 @@ func extractSNI(data []byte) (host string, rand string, err error, requiredLen i
 func tunnel(dst io.WriteCloser, src io.Reader, wg *sync.WaitGroup) {
 	defer wg.Done()
 	defer dst.Close()
-	bx := g_pool.Get()
-	defer g_pool.Put(bx)
 
-	buf := bx
-	io.CopyBuffer(dst, src, buf)
+	io.Copy(dst, src)
 }
 
 func PrintStatus(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	w.WriteHeader(200)
-	w.Write([]byte(fmt.Sprintf("make count = %d\n", g_pool.count)))
 }
