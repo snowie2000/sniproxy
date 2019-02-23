@@ -81,7 +81,7 @@ var hostMap map[string]string = make(map[string]string)
 
 var g_pool sync.Pool = sync.Pool{
 	New: func() interface{} {
-		return make([]byte, 512*1024)
+		return make([]byte, 1.5*1024)
 	},
 }
 
