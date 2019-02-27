@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"transport"
 
 	"github.com/golang/glog"
 )
@@ -77,52 +78,13 @@ func (this *dataProducer) Bytes() []byte {
 }
 
 var config hosts
+var dialer *net.Dialer
 var hostMap map[string]string = make(map[string]string)
 
 var g_pool sync.Pool = sync.Pool{
 	New: func() interface{} {
 		return make([]byte, 1.5*1024)
 	},
-}
-
-// tcpKeepAliveListener wraps a TCPListener to
-// activate TCP keep alive on every accepted connection
-type tcpKeepAliveListener struct {
-	// inner TCPlistener
-	*net.TCPListener
-
-	// interval between keep alives to set on accepted conns
-	keepAliveInterval time.Duration
-}
-
-// Accept a TCP Conn and enable TCP keep alive
-func (ln tcpKeepAliveListener) Accept() (c net.Conn, err error) {
-	tc, err := ln.AcceptTCP()
-	if err != nil {
-		return
-	}
-	err = tc.SetKeepAlive(true)
-	if err != nil {
-		return
-	}
-	err = tc.SetKeepAlivePeriod(ln.keepAliveInterval)
-	if err != nil {
-		return
-	}
-	return tc, nil
-}
-
-// TCPListener creates a Listener for TCP proxy server.
-func TCPListener(addr string) (net.Listener, error) {
-	laddr, err := net.ResolveTCPAddr("tcp", addr)
-	if err != nil {
-		return nil, err
-	}
-	ln, err := net.ListenTCP("tcp", laddr)
-	if err != nil {
-		return nil, err
-	}
-	return &tcpKeepAliveListener{ln, KeepAliveTime}, nil
 }
 
 func main() {
@@ -152,13 +114,17 @@ func main() {
 	} else {
 		os.Exit(-1)
 	}
-	ln, err := TCPListener(config.Listen)
+	ln, err := transport.NewKeepAliveListener("tcp", config.Listen, KeepAliveTime)
 	_, port, _ = net.SplitHostPort(config.Listen)
 	if err != nil {
 		glog.Fatalf("Listen failed: %v\n", err)
 	}
 	glog.Infof("Listen on %s\n", ln.Addr())
 
+	dialer = transport.NewMarkedDialer(&net.Dialer{
+		Timeout:   time.Second * 15,
+		KeepAlive: KeepAliveTime,
+	}, 0)
 	for {
 		c, err := ln.Accept()
 		if err != nil {
@@ -244,7 +210,7 @@ func serve(c net.Conn) {
 		}
 	}
 
-	rc, err := net.Dial("tcp", raddr)
+	rc, err := dialer.Dial("tcp", raddr)
 	if err != nil {
 		glog.Warningf("Dial %v error: %v\n", raddr, err)
 		return

@@ -2,6 +2,7 @@
 	"Listen":":443",
 	"tls": [
 		{"name": "gate.mactype.net", "value":"127.0.0.1:4443"},
-		{"name": "home.mactype.net", "value":"127.0.0.1:992"}
+		{"name": "home.mactype.net", "value":"127.0.0.1:992"},
+		{"name": "storage.2cn.in", "value":"47.88.229.51:443"}
 	]
 }
