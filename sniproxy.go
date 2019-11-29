@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -40,6 +41,7 @@ type hosts struct {
 	Listen  string
 	Tls     []host
 	Default string
+	API     string
 	Acme    string
 }
 
@@ -80,11 +82,51 @@ func (this *dataProducer) Bytes() []byte {
 var config hosts
 var dialer *net.Dialer
 var hostMap map[string]string = make(map[string]string)
+var g_APISrv *realIPServer
 
 var g_pool sync.Pool = sync.Pool{
 	New: func() interface{} {
 		return make([]byte, 1.5*1024)
 	},
+}
+
+type realIPServer struct {
+	lock  *sync.RWMutex
+	ipmap map[int]string
+}
+
+func (this *realIPServer) Add(ip string, port int) {
+	this.lock.Lock()
+	defer this.lock.Unlock()
+
+	this.ipmap[port] = ip
+}
+
+func (this *realIPServer) serve(addr string) {
+	ln, e := net.Listen("tcp", addr)
+	if e != nil {
+		glog.Info("API failed to start")
+		return
+	}
+	defer ln.Close()
+
+	http.HandleFunc("/query", func(w http.ResponseWriter, r *http.Request) {
+		this.lock.RLock()
+		defer this.lock.RUnlock()
+
+		p := r.URL.Query().Get("port")
+		np, e := strconv.Atoi(p)
+		if e == nil && np > 0 {
+			if ip, ok := this.ipmap[np]; ok {
+				w.WriteHeader(200)
+				w.Write([]byte(ip))
+				return
+			}
+		}
+		http.Error(w, "", http.StatusNotFound)
+	})
+	glog.Infof("API service listening on %s", addr)
+	http.Serve(ln, nil)
 }
 
 func main() {
@@ -102,7 +144,9 @@ func main() {
 		s = p + string(os.PathSeparator) + "config.json"
 	}
 	if f, err := ioutil.ReadFile(s); err == nil {
-		json.Unmarshal(f, &config)
+		if err = json.Unmarshal(f, &config); err != nil {
+			glog.Fatalf("Error parsing config: \"%s\"", err.Error())
+		}
 		var ip string
 		for _, h := range config.Tls {
 			ip = h.Value
@@ -114,6 +158,16 @@ func main() {
 	} else {
 		os.Exit(-1)
 	}
+
+	//start API service
+	if config.API != "" {
+		g_APISrv = &realIPServer{
+			lock:  &sync.RWMutex{},
+			ipmap: make(map[int]string),
+		}
+		go g_APISrv.serve(config.API)
+	}
+
 	ln, err := transport.NewKeepAliveListener("tcp", config.Listen, KeepAliveTime)
 	_, port, _ = net.SplitHostPort(config.Listen)
 	if err != nil {
@@ -216,6 +270,9 @@ func serve(c net.Conn) {
 		return
 	}
 	defer rc.Close()
+	if g_APISrv != nil {
+		g_APISrv.Add(c.RemoteAddr().String(), rc.LocalAddr().(*net.TCPAddr).Port)
+	}
 
 	_, err = rc.Write(reader.Bytes())
 	if err != nil {
