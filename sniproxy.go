@@ -33,8 +33,9 @@ var (
 )
 
 type host struct {
-	Name  string
-	Value string
+	Name    string
+	Value   string
+	Proxied bool // true则传递proxy protocol v2报头，否则为直连
 }
 
 type hosts struct {
@@ -81,7 +82,7 @@ func (this *dataProducer) Bytes() []byte {
 
 var config hosts
 var dialer *net.Dialer
-var hostMap map[string]string = make(map[string]string)
+var hostMap = make(map[string]host)
 var g_APISrv *realIPServer
 
 var g_pool sync.Pool = sync.Pool{
@@ -152,7 +153,7 @@ func main() {
 			ip = h.Value
 			_, _, err := net.SplitHostPort(ip)
 			if err == nil {
-				hostMap[strings.ToLower(h.Name)] = h.Value
+				hostMap[strings.ToLower(h.Name)] = h
 			}
 		}
 	} else {
@@ -247,12 +248,14 @@ func serve(c net.Conn) {
 	glog.Infof("extractSNI get %v", host)
 
 	var raddr string
+	var proxied bool = false // 默认禁止ppv2
 	if host == "" {
 		raddr = config.Default
 	} else {
 		if n, ok := hostMap[host]; ok {
-			glog.Infof("%s ==> %s", host, n)
-			raddr = n
+			glog.Infof("%s ==> %s", host, n.Value)
+			raddr = n.Value
+			proxied = n.Proxied
 		} else {
 			if strings.HasSuffix(host, ".acme.invalid") && config.Acme != "" {
 				raddr = config.Acme
@@ -272,6 +275,10 @@ func serve(c net.Conn) {
 	defer rc.Close()
 	if g_APISrv != nil {
 		g_APISrv.Add(c.RemoteAddr().String(), rc.LocalAddr().(*net.TCPAddr).Port)
+	}
+	// if proxy procotol is required, send it
+	if proxied {
+		WriteProxyProtocol(rc, c.RemoteAddr(), c.LocalAddr())
 	}
 
 	_, err = rc.Write(reader.Bytes())
