@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -14,8 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
+	"transport"
 
 	"github.com/golang/glog"
 )
@@ -37,15 +36,15 @@ var (
 )
 
 type host struct {
-	Name  string
-	Value string
+	Name    string
+	Value   string
+	Proxied bool // true则传递proxy protocol v2报头，否则为直连
 }
 
 type hosts struct {
 	Listen  string
 	Tls     []host
 	Default string
-	Acme    string
 }
 
 type buferror struct {
@@ -83,63 +82,13 @@ func (this *dataProducer) Bytes() []byte {
 }
 
 var config hosts
-var hostMap map[string]string = make(map[string]string)
+var dialer *net.Dialer
+var hostMap = make(map[string]host)
 
 var g_pool sync.Pool = sync.Pool{
 	New: func() interface{} {
 		return make([]byte, 1.5*1024)
 	},
-}
-
-// tcpKeepAliveListener wraps a TCPListener to
-// activate TCP keep alive on every accepted connection
-type tcpKeepAliveListener struct {
-	// inner TCPlistener
-	*net.TCPListener
-
-	// interval between keep alives to set on accepted conns
-	keepAliveInterval time.Duration
-}
-
-// Accept a TCP Conn and enable TCP keep alive
-func (ln tcpKeepAliveListener) Accept() (c net.Conn, err error) {
-	tc, err := ln.AcceptTCP()
-	if err != nil {
-		return
-	}
-	err = tc.SetKeepAlive(true)
-	if err != nil {
-		return
-	}
-	err = tc.SetKeepAlivePeriod(ln.keepAliveInterval)
-	if err != nil {
-		return
-	}
-	return tc, nil
-}
-
-func listenerController() func(network, address string, c syscall.RawConn) error {
-	return func(network, address string, c syscall.RawConn) error {
-		return c.Control(func(fd uintptr) {
-			syscall.SetsockoptInt(int(fd), syscall.SOL_TCP, TCP_FASTOPEN, 1) // 启用tcpfastopen
-		})
-	}
-}
-
-func NewKeepAliveListener(network string, addr string) (ln net.Listener, err error) {
-	if network == "tcp" || network == "tcp4" || network == "tcp6" {
-		var lc net.ListenConfig
-		lc.Control = listenerController()
-		ctx := context.Background()
-		if ln, err = lc.Listen(ctx, network, addr); err == nil {
-			if tn, ok := ln.(*net.TCPListener); ok {
-				return &tcpKeepAliveListener{tn, KeepAliveTime}, nil
-			}
-		}
-		return
-	} else {
-		return nil, errors.New("Only tcp network is accepted")
-	}
 }
 
 func main() {
@@ -157,25 +106,31 @@ func main() {
 		s = p + string(os.PathSeparator) + "config.json"
 	}
 	if f, err := ioutil.ReadFile(s); err == nil {
-		json.Unmarshal(f, &config)
+		if err = json.Unmarshal(f, &config); err != nil {
+			glog.Fatalf("Error parsing config: \"%s\"", err.Error())
+		}
 		var ip string
 		for _, h := range config.Tls {
 			ip = h.Value
 			_, _, err := net.SplitHostPort(ip)
 			if err == nil {
-				hostMap[strings.ToLower(h.Name)] = h.Value
+				hostMap[strings.ToLower(h.Name)] = h
 			}
 		}
 	} else {
 		os.Exit(-1)
 	}
-	ln, err := NewKeepAliveListener("tcp", config.Listen)
+	ln, err := transport.NewKeepAliveListener("tcp", config.Listen, KeepAliveTime)
 	_, port, _ = net.SplitHostPort(config.Listen)
 	if err != nil {
 		glog.Fatalf("Listen failed: %v\n", err)
 	}
 	glog.Infof("Listen on %s\n", ln.Addr())
 
+	dialer = transport.NewMarkedDialer(&net.Dialer{
+		Timeout:   time.Second * 15,
+		KeepAlive: KeepAliveTime,
+	}, 0)
 	for {
 		c, err := ln.Accept()
 		if err != nil {
@@ -244,29 +199,31 @@ func serve(c net.Conn) {
 	glog.Infof("extractSNI get %v", host)
 
 	var raddr string
+	var proxied bool = false // 默认禁止ppv2
 	if host == "" {
 		raddr = config.Default
 	} else {
 		if n, ok := hostMap[host]; ok {
-			glog.Infof("%s ==> %s", host, n)
-			raddr = n
+			glog.Infof("%s ==> %s", host, n.Value)
+			raddr = n.Value
+			proxied = n.Proxied
 		} else {
-			if strings.HasSuffix(host, ".acme.invalid") && config.Acme != "" {
-				raddr = config.Acme
-				glog.Infof("Acme challenge found")
-			} else {
-				glog.Warningln(host, "has no match record")
-				return
-			}
+			glog.Warningln(host, "has no match record")
+			return
 		}
 	}
 
-	rc, err := net.Dial("tcp", raddr)
+	rc, err := dialer.Dial("tcp", raddr)
 	if err != nil {
 		glog.Warningf("Dial %v error: %v\n", raddr, err)
 		return
 	}
 	defer rc.Close()
+
+	// if proxy procotol is required, send it
+	if proxied {
+		WriteProxyProtocol(rc, c.RemoteAddr(), c.LocalAddr())
+	}
 
 	_, err = rc.Write(reader.Bytes())
 	if err != nil {
