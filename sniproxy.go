@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/golang/glog"
@@ -21,6 +23,10 @@ import (
 const (
 	extensionServerName uint16 = 0
 	KeepAliveTime              = 60 * time.Second
+	// For incoming connections.
+	TCP_FASTOPEN = 23
+	// For out-going connections.
+	TCP_FASTOPEN_CONNECT = 30
 )
 
 var (
@@ -112,17 +118,28 @@ func (ln tcpKeepAliveListener) Accept() (c net.Conn, err error) {
 	return tc, nil
 }
 
-// TCPListener creates a Listener for TCP proxy server.
-func TCPListener(addr string) (net.Listener, error) {
-	laddr, err := net.ResolveTCPAddr("tcp", addr)
-	if err != nil {
-		return nil, err
+func listenerController() func(network, address string, c syscall.RawConn) error {
+	return func(network, address string, c syscall.RawConn) error {
+		return c.Control(func(fd uintptr) {
+			syscall.SetsockoptInt(int(fd), syscall.SOL_TCP, TCP_FASTOPEN, 1) // 启用tcpfastopen
+		})
 	}
-	ln, err := net.ListenTCP("tcp", laddr)
-	if err != nil {
-		return nil, err
+}
+
+func NewKeepAliveListener(network string, addr string) (ln net.Listener, err error) {
+	if network == "tcp" || network == "tcp4" || network == "tcp6" {
+		var lc net.ListenConfig
+		lc.Control = listenerController()
+		ctx := context.Background()
+		if ln, err = lc.Listen(ctx, network, addr); err == nil {
+			if tn, ok := ln.(*net.TCPListener); ok {
+				return &tcpKeepAliveListener{tn, KeepAliveTime}, nil
+			}
+		}
+		return
+	} else {
+		return nil, errors.New("Only tcp network is accepted")
 	}
-	return &tcpKeepAliveListener{ln, KeepAliveTime}, nil
 }
 
 func main() {
@@ -152,7 +169,7 @@ func main() {
 	} else {
 		os.Exit(-1)
 	}
-	ln, err := TCPListener(config.Listen)
+	ln, err := NewKeepAliveListener("tcp", config.Listen)
 	_, port, _ = net.SplitHostPort(config.Listen)
 	if err != nil {
 		glog.Fatalf("Listen failed: %v\n", err)
