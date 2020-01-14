@@ -6,6 +6,7 @@ import (
 	"flag"
 	"io"
 	"io/ioutil"
+	"log"
 	"mapset"
 	"net"
 	"net/http"
@@ -13,8 +14,11 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"transport"
+
+	"github.com/sevlyar/go-daemon"
 
 	"github.com/golang/glog"
 )
@@ -59,6 +63,20 @@ type dataProducer struct {
 	c      net.Conn
 }
 
+type staticHostMap map[string]host
+type wildcardHostMap map[string]host
+
+func (this wildcardHostMap) Match(hostname string) (host, bool) {
+	split := strings.SplitAfterN(hostname, ".", 2)
+	split[0] = "*"
+	hostname = strings.Join(split, ".")
+	if h, ok := this[hostname]; ok {
+		return h, true
+	} else {
+		return host{}, false
+	}
+}
+
 func (this *dataProducer) Ensure(nLen int) ([]byte, error) {
 	if nLen > len(this.rawbuf) {
 		return nil, errors.New("Buffer underrun")
@@ -81,9 +99,13 @@ func (this *dataProducer) Bytes() []byte {
 	return this.rawbuf[:this.l]
 }
 
-var config hosts
-var dialer *net.Dialer
-var hostMap = make(map[string]host)
+var (
+	config      hosts
+	dialer      *net.Dialer
+	hostMap     staticHostMap
+	wildHostMap wildcardHostMap
+	cfgpath     = ""
+)
 
 var g_pool sync.Pool = sync.Pool{
 	New: func() interface{} {
@@ -91,34 +113,85 @@ var g_pool sync.Pool = sync.Pool{
 	},
 }
 
-func main() {
-	s := ""
-	flag.Set("logtostderr", "true")
-	flag.StringVar(&s, "c", "", "configuration")
-	flag.Parse()
-
-	//enable pprof
-	//http.HandleFunc("/status", PrintStatus)
-	//go http.ListenAndServe("localhost:6060", nil)
-
+func loadConfig(s string) error {
 	if s == "" {
 		p, _ := filepath.Abs(filepath.Dir(os.Args[0]))
 		s = p + string(os.PathSeparator) + "config.json"
 	}
 	if f, err := ioutil.ReadFile(s); err == nil {
 		if err = json.Unmarshal(f, &config); err != nil {
-			glog.Fatalf("Error parsing config: \"%s\"", err.Error())
+			return err
 		}
+
+		hostMap = make(staticHostMap)
+		wildHostMap = make(wildcardHostMap)
 		var ip string
 		for _, h := range config.Tls {
 			ip = h.Value
 			_, _, err := net.SplitHostPort(ip)
 			if err == nil {
-				hostMap[strings.ToLower(h.Name)] = h
+				if strings.Contains(h.Name, "*") {
+					wildHostMap[strings.ToLower(h.Name)] = h // it's a wildcard match
+				} else {
+					hostMap[strings.ToLower(h.Name)] = h
+				}
 			}
 		}
+		return nil
 	} else {
-		os.Exit(-1)
+		return err
+	}
+}
+
+func reloadHandler(sig os.Signal) error {
+	err := loadConfig(cfgpath)
+	if err == nil {
+		glog.Infoln("configuration reloaded")
+	} else {
+		glog.Infoln("failed to reload configuration,", err)
+	}
+	return err
+}
+
+func termHandler(sig os.Signal) error {
+	return daemon.ErrStop
+}
+
+func main() {
+	logPath := ""
+	flag.Set("logtostderr", "true")
+	flag.StringVar(&cfgpath, "c", "", "configuration")
+	flag.StringVar(&logPath, "log", "", "log to file")
+	signal := flag.String("s", "", "signals, possible values: \"reload\", \"stop\"")
+	flag.Parse()
+
+	daemon.AddCommand(daemon.StringFlag(signal, "reload"), syscall.SIGUSR1, reloadHandler)
+	daemon.AddCommand(daemon.StringFlag(signal, "stop"), syscall.SIGTERM, termHandler)
+	cntxt := &daemon.Context{
+		PidFileName: "sniproxy.pid",
+		PidFilePerm: 0644,
+		LogFileName: logPath,
+		LogFilePerm: 0640,
+		WorkDir:     "./",
+		Umask:       027,
+		Args:        []string{},
+	}
+	// send command to daemon if specified
+	if len(daemon.ActiveFlags()) > 0 {
+		d, err := cntxt.Search()
+		if err != nil {
+			glog.Fatalf("Unable send signal to the daemon: %s", err.Error())
+		}
+		daemon.SendCommands(d)
+		return
+	}
+
+	//enable pprof
+	//http.HandleFunc("/status", PrintStatus)
+	//go http.ListenAndServe("localhost:6060", nil)
+
+	if err := loadConfig(cfgpath); err != nil {
+		glog.Fatalln(err)
 	}
 	ln, err := transport.NewKeepAliveListener("tcp", config.Listen, KeepAliveTime)
 	_, port, _ = net.SplitHostPort(config.Listen)
@@ -127,19 +200,34 @@ func main() {
 	}
 	glog.Infof("Listen on %s\n", ln.Addr())
 
-	dialer = transport.NewMarkedDialer(&net.Dialer{
-		Timeout:   time.Second * 15,
-		KeepAlive: KeepAliveTime,
-	}, 0)
-	for {
-		c, err := ln.Accept()
-		if err != nil {
-			glog.Infof("Accept error: %v\n", err)
-			time.Sleep(100 * time.Millisecond)
-			continue
-		}
-		go serve(c)
+	glog.Infoln("Sniproxy started")
+	// make a daemon process
+	d, err := cntxt.Reborn()
+	if err != nil {
+		log.Fatalln(err)
 	}
+	if d != nil {
+		return
+	}
+	defer cntxt.Release()
+
+	go func() {
+		dialer = transport.NewMarkedDialer(&net.Dialer{
+			Timeout:   time.Second * 15,
+			KeepAlive: KeepAliveTime,
+		}, 0)
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				glog.Infof("Accept error: %v\n", err)
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+			go serve(c)
+		}
+	}()
+
+	daemon.ServeSignals()
 }
 
 func serve(c net.Conn) {
@@ -204,12 +292,18 @@ func serve(c net.Conn) {
 		raddr = config.Default
 	} else {
 		if n, ok := hostMap[host]; ok {
-			glog.Infof("%s ==> %s", host, n.Value)
+			glog.Infof("exact match %s ==> %s", host, n.Value)
 			raddr = n.Value
 			proxied = n.Proxied
 		} else {
-			glog.Warningln(host, "has no match record")
-			return
+			if h, ok := wildHostMap.Match(host); ok {
+				glog.Infof("wildcard match %s ==> %s", host, h.Value)
+				raddr = h.Value
+				proxied = h.Proxied
+			} else {
+				glog.Warningln(host, "has no match record")
+				return
+			}
 		}
 	}
 
@@ -220,7 +314,7 @@ func serve(c net.Conn) {
 	}
 	defer rc.Close()
 
-	// if proxy procotol is required, send it
+	// if proxy procotol is requested, send it
 	if proxied {
 		WriteProxyProtocol(rc, c.RemoteAddr(), c.LocalAddr())
 	}
