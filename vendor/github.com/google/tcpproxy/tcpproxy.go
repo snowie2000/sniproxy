@@ -146,6 +146,31 @@ func (p *Proxy) AddRoute(ipPort string, dest Target) {
 	p.addRoute(ipPort, fixedTarget{dest})
 }
 
+// added by snowie
+// add any custom match interface to proxy (to improve performace as the builtin route is as slow as hell)
+type CustomRoute interface {
+	Match(*bufio.Reader) (Target, string)
+}
+
+type customMatch struct {
+	r CustomRoute
+}
+
+func (c customMatch) match(r *bufio.Reader) (Target, string) {
+	return c.r.Match(r)
+}
+
+func (p *Proxy) AddCustomRoute(ipPort string, r CustomRoute) {
+	p.addRoute(ipPort, customMatch{r})
+}
+
+//expose it as it is very useful
+func ClientHelloServerName(br *bufio.Reader) (sni string) {
+	return clientHelloServerName(br)
+}
+
+//end of modification
+
 type fixedTarget struct {
 	t Target
 }
