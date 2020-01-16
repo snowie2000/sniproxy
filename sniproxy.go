@@ -55,10 +55,11 @@ type hosts struct {
 
 type HostMap map[string]host
 
-func (this HostMap) Match(r *bufio.Reader) (tcpproxy.Target, string) {
+func (this *HostMap) Match(r *bufio.Reader) (tcpproxy.Target, string) {
 	hostname := strings.ToLower(tcpproxy.ClientHelloServerName(r))
 	// firstly, try exact match
-	if h, ok := this[hostname]; ok {
+	self := *this
+	if h, ok := self[hostname]; ok {
 		return &tcpproxy.DialProxy{
 			Addr:                 h.Value,
 			ProxyProtocolVersion: h.ProxyProtocolVersion,
@@ -66,16 +67,16 @@ func (this HostMap) Match(r *bufio.Reader) (tcpproxy.Target, string) {
 	}
 	// then wildcard match
 	split := strings.SplitAfterN(hostname, ".", 2)
-	split[0] = "*"
-	hostname = strings.Join(split, ".")
-	if h, ok := this[hostname]; ok {
-		log.Println("sending to", h)
-		return &tcpproxy.DialProxy{
-			Addr:                 h.Value,
-			ProxyProtocolVersion: h.ProxyProtocolVersion,
-		}, hostname
+	if len(split) > 0 {
+		split[0] = "*"
+		hostname = strings.Join(split, ".")
+		if h, ok := self[hostname]; ok {
+			return &tcpproxy.DialProxy{
+				Addr:                 h.Value,
+				ProxyProtocolVersion: h.ProxyProtocolVersion,
+			}, hostname
+		}
 	}
-
 	// fallback to default
 	if config.Default != "" {
 		return tcpproxy.To(config.Default), hostname
@@ -171,7 +172,7 @@ func main() {
 	if bind, err := loadConfig(cfgpath); err != nil {
 		glog.Fatalln(err)
 	} else {
-		p.AddCustomRoute(bind, hostMap)
+		p.AddCustomRoute(bind, &hostMap)
 	}
 	glog.Infoln("Sniproxy (google tcpproxy version) started")
 
