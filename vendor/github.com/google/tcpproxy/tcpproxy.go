@@ -61,6 +61,8 @@ import (
 	"log"
 	"net"
 	"time"
+
+	pp "github.com/pires/go-proxyproto"
 )
 
 // Proxy is a proxy. Its zero value is a valid proxy that does
@@ -419,24 +421,34 @@ func (dp *DialProxy) sendProxyHeader(w io.Writer, src net.Conn) error {
 	case 0:
 		return nil
 	case 1:
+		fallthrough
+	case 2:
 		var srcAddr, dstAddr *net.TCPAddr
 		if a, ok := src.RemoteAddr().(*net.TCPAddr); ok {
 			srcAddr = a
+		} else {
+			srcAddr, _ = net.ResolveTCPAddr("tcp", "0.0.0.0:0")
 		}
 		if a, ok := src.LocalAddr().(*net.TCPAddr); ok {
 			dstAddr = a
+		} else {
+			dstAddr, _ = net.ResolveTCPAddr("tcp", "0.0.0.0:0")
 		}
 
-		if srcAddr == nil || dstAddr == nil {
-			_, err := io.WriteString(w, "PROXY UNKNOWN\r\n")
-			return err
+		hdr := &pp.Header{
+			Version:            byte(dp.ProxyProtocolVersion),
+			Command:            pp.PROXY,
+			SourceAddress:      srcAddr.IP,
+			DestinationAddress: dstAddr.IP,
+			SourcePort:         uint16(srcAddr.Port),
+			DestinationPort:    uint16(dstAddr.Port),
 		}
 
-		family := "TCP4"
+		hdr.TransportProtocol = pp.TCPv4
 		if srcAddr.IP.To4() == nil {
-			family = "TCP6"
+			hdr.TransportProtocol = pp.TCPv6
 		}
-		_, err := fmt.Fprintf(w, "PROXY %s %s %s %d %d\r\n", family, srcAddr.IP, dstAddr.IP, srcAddr.Port, dstAddr.Port)
+		_, err := hdr.WriteTo(w)
 		return err
 	default:
 		return fmt.Errorf("PROXY protocol version %d not supported", dp.ProxyProtocolVersion)

@@ -102,7 +102,7 @@ func loadConfig(s string) (bind string, e error) {
 			_, _, err := net.SplitHostPort(ip)
 			if err == nil {
 				if h.Proxied {
-					h.ProxyProtocolVersion = 1 // use builtin ppv1 for now
+					h.ProxyProtocolVersion = 2 // use ppv2 for now
 				} else {
 					h.ProxyProtocolVersion = 0
 				}
