@@ -1,0 +1,3 @@
+[submodule "vendor/github.com/sevlyar/go-daemon"]
+	path = vendor/github.com/sevlyar/go-daemon
+	url = https://github.com/sevlyar/go-daemon
