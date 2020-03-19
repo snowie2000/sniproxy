@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -9,6 +11,8 @@ import (
 	"log"
 	"mapset"
 	"net"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,6 +55,7 @@ type hosts struct {
 	Listen  string
 	Tls     []host
 	Default string
+	Hsts    bool // true则443端口同时接受http和https，对http返回302
 }
 
 type HostMap map[string]host
@@ -130,6 +135,49 @@ func termHandler(sig os.Signal) error {
 	return daemon.ErrStop
 }
 
+type connWriter struct {
+	resp http.Response
+	body *bytes.Buffer
+}
+
+func (c *connWriter) Header() http.Header {
+	return c.resp.Header
+}
+
+func (c *connWriter) Write(b []byte) (int, error) {
+	if c.resp.Body == nil {
+		c.body = &bytes.Buffer{}
+		c.resp.Body = ioutil.NopCloser(c.body)
+	}
+	return c.body.Write(b)
+}
+
+func (c *connWriter) WriteHeader(statusCode int) {
+	c.resp.StatusCode = statusCode
+}
+
+func (c *connWriter) WriteTo(conn net.Conn) error {
+	return c.resp.Write(conn)
+}
+
+type hstsRedirector struct{}
+
+func (h *hstsRedirector) HandleConn(c net.Conn) {
+	defer c.Close()
+	req, err := http.ReadRequest(bufio.NewReader(c))
+	if err == nil {
+		req.URL.Scheme = "https"
+		req.URL.Host = req.Host
+		w := &connWriter{
+			resp: http.Response{
+				Header: make(http.Header),
+			},
+		}
+		http.Redirect(w, req, req.URL.String(), http.StatusPermanentRedirect)
+		w.WriteTo(c)
+	}
+}
+
 func main() {
 	logPath := ""
 	foreground := false
@@ -137,11 +185,11 @@ func main() {
 	flag.StringVar(&cfgpath, "c", "", "configuration")
 	flag.StringVar(&logPath, "log", "", "log to file")
 	flag.BoolVar(&foreground, "f", false, "run foreground")
+
 	signal := flag.String("s", "", "signals, possible values: \"reload\", \"stop\"")
 	flag.Parse()
 
 	var cntxt *daemon.Context
-
 	if !foreground {
 		daemon.AddCommand(daemon.StringFlag(signal, "reload"), syscall.SIGUSR1, reloadHandler)
 		daemon.AddCommand(daemon.StringFlag(signal, "stop"), syscall.SIGTERM, termHandler)
@@ -164,15 +212,18 @@ func main() {
 			return
 		}
 	}
-
 	//enable pprof
-	//http.HandleFunc("/status", PrintStatus)
-	//go http.ListenAndServe("localhost:6060", nil)
+	go http.ListenAndServe("localhost:6666", nil)
 
 	if bind, err := loadConfig(cfgpath); err != nil {
 		glog.Fatalln(err)
 	} else {
 		p.AddCustomRoute(bind, &hostMap)
+		if config.Hsts {
+			p.AddHTTPHostMatchRoute(bind, func(ctx context.Context, hostname string) bool {
+				return hostname != ""
+			}, &hstsRedirector{})
+		}
 	}
 	glog.Infoln("Sniproxy (google tcpproxy version) started")
 
