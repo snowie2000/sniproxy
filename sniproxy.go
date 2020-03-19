@@ -157,6 +157,7 @@ func (c *connWriter) WriteHeader(statusCode int) {
 }
 
 func (c *connWriter) WriteTo(conn net.Conn) error {
+	c.resp.ContentLength = int64(c.body.Len())
 	return c.resp.Write(conn)
 }
 
@@ -170,10 +171,13 @@ func (h *hstsRedirector) HandleConn(c net.Conn) {
 		req.URL.Host = req.Host
 		w := &connWriter{
 			resp: http.Response{
-				Header: make(http.Header),
+				Proto:      "HTTP/1.1",
+				ProtoMajor: 1,
+				ProtoMinor: 1,
+				Header:     make(http.Header),
 			},
 		}
-		http.Redirect(w, req, req.URL.String(), http.StatusPermanentRedirect)
+		http.Redirect(w, req, req.URL.String(), http.StatusMovedPermanently)
 		w.WriteTo(c)
 	}
 }
