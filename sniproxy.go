@@ -171,10 +171,12 @@ func (h *hstsRedirector) HandleConn(c net.Conn) {
 		req.URL.Host = req.Host
 		w := &connWriter{
 			resp: http.Response{
-				Proto:      "HTTP/1.1",
-				ProtoMajor: 1,
-				ProtoMinor: 1,
-				Header:     make(http.Header),
+				Proto:        "HTTP/1.1",
+				ProtoMajor:   1,
+				ProtoMinor:   1,
+				Header:       make(http.Header),
+				Close:        true,
+				Uncompressed: true,
 			},
 		}
 		http.Redirect(w, req, req.URL.String(), http.StatusMovedPermanently)
