@@ -31,6 +31,7 @@ const (
 	TCP_FASTOPEN = 23
 	// For out-going connections.
 	TCP_FASTOPEN_CONNECT = 30
+	VERSION              = "v03.24"
 )
 
 var (
@@ -231,7 +232,7 @@ func main() {
 			}, &hstsRedirector{})
 		}
 	}
-	glog.Infoln("Sniproxy (google tcpproxy version) started")
+	glog.Infoln("Sniproxy (google tcpproxy version)", VERSION, "started")
 
 	if foreground {
 		p.Run()
