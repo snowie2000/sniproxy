@@ -252,6 +252,7 @@ func (p *Proxy) serveListener(ret chan<- error, ln net.Listener, routes []route)
 // serveConn runs in its own goroutine and matches c against routes.
 // It returns whether it matched purely for testing.
 func (p *Proxy) serveConn(c net.Conn, routes []route) bool {
+	c.SetDeadline(time.Now().Add(15 * time.Second)) // each connection is given 15s to complete its handshake
 	br := bufio.NewReader(c)
 	for _, route := range routes {
 		if target, hostName := route.match(br); target != nil {
@@ -263,6 +264,7 @@ func (p *Proxy) serveConn(c net.Conn, routes []route) bool {
 					Conn:     c,
 				}
 			}
+			c.SetDeadline(time.Time{})
 			target.HandleConn(c)
 			return true
 		}

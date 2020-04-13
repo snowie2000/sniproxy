@@ -31,7 +31,7 @@ const (
 	TCP_FASTOPEN = 23
 	// For out-going connections.
 	TCP_FASTOPEN_CONNECT = 30
-	VERSION              = "v03.24"
+	VERSION              = "v04.13"
 )
 
 var (
@@ -246,8 +246,7 @@ func main() {
 			return
 		}
 		defer cntxt.Release()
-		go p.Run()
-
-		daemon.ServeSignals()
+		go daemon.ServeSignals()
+		log.Println("Process exit with error", p.Run())
 	}
 }
