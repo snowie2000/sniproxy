@@ -242,8 +242,7 @@ func (p *Proxy) serveListener(ret chan<- error, ln net.Listener, routes []route)
 	for {
 		c, err := ln.Accept()
 		if err != nil {
-			ret <- err
-			return
+			continue
 		}
 		go p.serveConn(c, routes)
 	}
