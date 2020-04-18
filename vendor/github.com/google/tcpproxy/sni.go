@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"net"
 	"strings"
@@ -74,8 +75,8 @@ type sniMatch struct {
 }
 
 func (m sniMatch) match(br *bufio.Reader) (Target, string) {
-	sni := clientHelloServerName(br)
-	if m.matcher(context.TODO(), sni) {
+	sni, err := clientHelloServerName(br)
+	if err == nil && m.matcher(context.TODO(), sni) {
 		return m.target, sni
 	}
 	return nil, ""
@@ -89,7 +90,10 @@ type acmeMatch struct {
 }
 
 func (m *acmeMatch) match(br *bufio.Reader) (Target, string) {
-	sni := clientHelloServerName(br)
+	sni, err := clientHelloServerName(br)
+	if err != nil {
+		return nil, ""
+	}
 	if !strings.HasSuffix(sni, ".acme.invalid") {
 		return nil, ""
 	}
@@ -157,20 +161,21 @@ func tryACME(ctx context.Context, ch chan<- Target, dest Target, sni string) {
 // clientHelloServerName returns the SNI server name inside the TLS ClientHello,
 // without consuming any bytes from br.
 // On any error, the empty string is returned.
-func clientHelloServerName(br *bufio.Reader) (sni string) {
+func clientHelloServerName(br *bufio.Reader) (sni string, err error) {
+	eNoTls := errors.New("invalid tls connection")
 	const recordHeaderLen = 5
 	hdr, err := br.Peek(recordHeaderLen)
 	if err != nil {
-		return ""
+		return "", err
 	}
 	const recordTypeHandshake = 0x16
 	if hdr[0] != recordTypeHandshake {
-		return "" // Not TLS.
+		return "", eNoTls // Not TLS.
 	}
 	recLen := int(hdr[3])<<8 | int(hdr[4]) // ignoring version in hdr[1:3]
 	helloBytes, err := br.Peek(recordHeaderLen + recLen)
 	if err != nil {
-		return ""
+		return "", err
 	}
 	tls.Server(sniSniffConn{r: bytes.NewReader(helloBytes)}, &tls.Config{
 		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
@@ -178,7 +183,7 @@ func clientHelloServerName(br *bufio.Reader) (sni string) {
 			return nil, nil
 		},
 	}).Handshake()
-	return
+	return sni, nil
 }
 
 // sniSniffConn is a net.Conn that reads from r, fails on Writes,

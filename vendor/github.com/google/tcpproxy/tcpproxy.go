@@ -167,7 +167,7 @@ func (p *Proxy) AddCustomRoute(ipPort string, r CustomRoute) {
 }
 
 //expose it as it is very useful
-func ClientHelloServerName(br *bufio.Reader) (sni string) {
+func ClientHelloServerName(br *bufio.Reader) (sni string, err error) {
 	return clientHelloServerName(br)
 }
 

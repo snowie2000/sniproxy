@@ -31,7 +31,7 @@ const (
 	TCP_FASTOPEN = 23
 	// For out-going connections.
 	TCP_FASTOPEN_CONNECT = 30
-	VERSION              = "v04.13"
+	VERSION              = "v04.18"
 )
 
 var (
@@ -62,10 +62,15 @@ type hosts struct {
 type HostMap map[string]host
 
 func (this *HostMap) Match(r *bufio.Reader) (tcpproxy.Target, string) {
-	hostname := strings.ToLower(tcpproxy.ClientHelloServerName(r))
+	sni, err := tcpproxy.ClientHelloServerName(r)
+	if err != nil {
+		return nil, ""
+	}
+	hostname := strings.ToLower(sni)
 	// firstly, try exact match
 	self := *this
 	if h, ok := self[hostname]; ok {
+		log.Println(hostname, "=>", h.Value)
 		return &tcpproxy.DialProxy{
 			Addr:                 h.Value,
 			ProxyProtocolVersion: h.ProxyProtocolVersion,
@@ -77,6 +82,7 @@ func (this *HostMap) Match(r *bufio.Reader) (tcpproxy.Target, string) {
 		split[0] = "*"
 		hostname = strings.Join(split, ".")
 		if h, ok := self[hostname]; ok {
+			log.Println(hostname, "=>", h.Value)
 			return &tcpproxy.DialProxy{
 				Addr:                 h.Value,
 				ProxyProtocolVersion: h.ProxyProtocolVersion,
@@ -85,6 +91,7 @@ func (this *HostMap) Match(r *bufio.Reader) (tcpproxy.Target, string) {
 	}
 	// fallback to default
 	if config.Default != "" {
+		log.Println(hostname, "=> [def]", config.Default)
 		return tcpproxy.To(config.Default), hostname
 	} else {
 		return nil, ""
