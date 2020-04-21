@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -40,6 +41,9 @@ var (
 	errNoEnoughData       error      = errors.New("Insufficient data provided")
 	randset               mapset.Set = mapset.NewSet()
 	hostMap               HostMap
+	fastMap               map[string]tcpproxy.Target
+	fastMapLock           sync.RWMutex
+	fastMapNilRec         int = 0
 	cfgpath               string
 	config                hosts
 	p                     tcpproxy.Proxy
@@ -61,39 +65,72 @@ type hosts struct {
 
 type HostMap map[string]host
 
-func (this *HostMap) Match(r *bufio.Reader) (tcpproxy.Target, string) {
+func (this *HostMap) Match(r *bufio.Reader) (t tcpproxy.Target, hostname string) {
 	sni, err := tcpproxy.ClientHelloServerName(r)
 	if err != nil {
 		return nil, ""
 	}
-	hostname := strings.ToLower(sni)
+	hostname = strings.ToLower(sni)
+
+	// try fast cache first
+	if func() bool {
+		fastMapLock.RLock()
+		defer fastMapLock.RUnlock()
+		if target, ok := fastMap[hostname]; ok {
+			log.Println("[hit]", hostname)
+			t = target
+			return true
+		}
+		return false
+	}() {
+		return
+	}
+
+	fastMapLock.Lock()
+	defer fastMapLock.Unlock()
 	// firstly, try exact match
 	self := *this
 	if h, ok := self[hostname]; ok {
 		log.Println(hostname, "=>", h.Value)
-		return &tcpproxy.DialProxy{
+		t = &tcpproxy.DialProxy{
 			Addr:                 h.Value,
 			ProxyProtocolVersion: h.ProxyProtocolVersion,
-		}, hostname
+		}
+		fastMap[hostname] = t
+		return
 	}
 	// then wildcard match
 	split := strings.SplitAfterN(hostname, ".", 2)
 	if len(split) > 0 {
 		split[0] = "*"
-		hostname = strings.Join(split, ".")
-		if h, ok := self[hostname]; ok {
-			log.Println(hostname, "=>", h.Value)
-			return &tcpproxy.DialProxy{
+		wildhost := strings.Join(split, ".")
+		if h, ok := self[wildhost]; ok {
+			log.Println(wildhost, "=>", h.Value)
+			t = &tcpproxy.DialProxy{
 				Addr:                 h.Value,
 				ProxyProtocolVersion: h.ProxyProtocolVersion,
-			}, hostname
+			}
+			fastMap[hostname] = t
+			return
 		}
 	}
 	// fallback to default
 	if config.Default != "" {
 		log.Println(hostname, "=> [def]", config.Default)
-		return tcpproxy.To(config.Default), hostname
+		t = tcpproxy.To(config.Default)
+		fastMap[hostname] = t
+		return
 	} else {
+		if fastMapNilRec > 10000 { // if more than 10000 entries cached in the fastmap, clean nil entries.
+			for k, v := range fastMap {
+				if v == nil {
+					delete(fastMap, k)
+				}
+			}
+			fastMapNilRec = 0
+		}
+		fastMapNilRec++ //no need to worry about cocurrency, we had fastMapLock mutex in front.
+		fastMap[hostname] = nil
 		return nil, ""
 	}
 }
@@ -109,6 +146,8 @@ func loadConfig(s string) (bind string, e error) {
 		}
 
 		hostMap = make(HostMap)
+		fastMap = make(map[string]tcpproxy.Target)
+		fastMapNilRec = 0
 		var ip string
 		for _, h := range config.Tls {
 			ip = h.Value
