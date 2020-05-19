@@ -32,7 +32,7 @@ const (
 	TCP_FASTOPEN = 23
 	// For out-going connections.
 	TCP_FASTOPEN_CONNECT = 30
-	VERSION              = "v04.18"
+	VERSION              = "v05.19"
 )
 
 var (
@@ -40,7 +40,8 @@ var (
 	errInvaildClientHello error      = errors.New("Invalid TLS ClientHello data")
 	errNoEnoughData       error      = errors.New("Insufficient data provided")
 	randset               mapset.Set = mapset.NewSet()
-	hostMap               HostMap
+	hostMap               HostMap    // extact matches and wildcard matches
+	suffixMap             HostMap    //suffix matches (for hosts start with .)
 	fastMap               map[string]tcpproxy.Target
 	fastMapLock           sync.RWMutex
 	fastMapNilRec         int = 0
@@ -114,6 +115,19 @@ func (this *HostMap) Match(r *bufio.Reader) (t tcpproxy.Target, hostname string)
 			return
 		}
 	}
+	// then suffix match
+	for k, v := range suffixMap {
+		if strings.HasSuffix("."+hostname, k) {
+			log.Println("."+hostname, "=>", v.Value)
+			t = &tcpproxy.DialProxy{
+				Addr:                 v.Value,
+				ProxyProtocolVersion: v.ProxyProtocolVersion,
+			}
+			fastMap[hostname] = t
+			return
+		}
+	}
+
 	// fallback to default
 	if config.Default != "" {
 		log.Println(hostname, "=> [def]", config.Default)
@@ -146,10 +160,14 @@ func loadConfig(s string) (bind string, e error) {
 		}
 
 		hostMap = make(HostMap)
+		suffixMap = make(HostMap)
 		fastMap = make(map[string]tcpproxy.Target)
 		fastMapNilRec = 0
 		var ip string
 		for _, h := range config.Tls {
+			if h.Name == "" {
+				continue
+			}
 			ip = h.Value
 			_, _, err := net.SplitHostPort(ip)
 			if err == nil {
@@ -158,7 +176,11 @@ func loadConfig(s string) (bind string, e error) {
 				} else {
 					h.ProxyProtocolVersion = 0
 				}
-				hostMap[strings.ToLower(h.Name)] = h
+				if []byte(h.Name)[0] == '.' {
+					suffixMap[strings.ToLower(h.Name)] = h
+				} else {
+					hostMap[strings.ToLower(h.Name)] = h
+				}
 			}
 		}
 		return config.Listen, nil
