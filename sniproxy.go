@@ -32,7 +32,7 @@ const (
 	TCP_FASTOPEN = 23
 	// For out-going connections.
 	TCP_FASTOPEN_CONNECT = 30
-	VERSION              = "v05.19"
+	VERSION              = "v09.16"
 )
 
 var (
@@ -109,6 +109,7 @@ func (this *HostMap) Match(r *bufio.Reader) (t tcpproxy.Target, hostname string)
 		if h, ok := self[wildhost]; ok {
 			log.Println(wildhost, "=>", h.Value)
 			t = &tcpproxy.DialProxy{
+				DialTimeout:          time.Second * 10,
 				Addr:                 h.Value,
 				ProxyProtocolVersion: h.ProxyProtocolVersion,
 			}
@@ -121,6 +122,7 @@ func (this *HostMap) Match(r *bufio.Reader) (t tcpproxy.Target, hostname string)
 		if strings.HasSuffix("."+hostname, k) {
 			log.Println("."+hostname, "=>", v.Value)
 			t = &tcpproxy.DialProxy{
+				DialTimeout:          time.Second * 10,
 				Addr:                 v.Value,
 				ProxyProtocolVersion: v.ProxyProtocolVersion,
 			}
@@ -132,7 +134,10 @@ func (this *HostMap) Match(r *bufio.Reader) (t tcpproxy.Target, hostname string)
 	// fallback to default
 	if config.Default != "" {
 		log.Println(hostname, "=> [def]", config.Default)
-		t = tcpproxy.To(config.Default)
+		t = &tcpproxy.DialProxy{
+			DialTimeout: time.Second * 10,
+			Addr:        config.Default,
+		}
 		fastMap[hostname] = t
 		return
 	} else {
