@@ -32,7 +32,7 @@ const (
 	TCP_FASTOPEN = 23
 	// For out-going connections.
 	TCP_FASTOPEN_CONNECT = 30
-	VERSION              = "v09.16"
+	VERSION              = "v10.29"
 )
 
 var (
@@ -58,10 +58,40 @@ type host struct {
 }
 
 type hosts struct {
-	Listen  string
-	Tls     []host
-	Default string
-	Hsts    bool // true则443端口同时接受http和https，对http返回302
+	Listen          string
+	Tls             []host
+	Default         string
+	DefaultInternal string // 仅可以从内部访问的转发，可用于dns解锁
+	Hsts            bool   // true则443端口同时接受http和https，对http返回302
+}
+
+type defaultProxy struct {
+	defaultServer  string
+	internalServer string
+}
+
+func (p *defaultProxy) HandleConn(c net.Conn) {
+	if p.internalServer != "" { // 有内部专用后端
+		addr, err := net.ResolveTCPAddr(c.RemoteAddr().Network(), c.RemoteAddr().String())
+		if err == nil && addr.IP.IsLoopback() { // 符合内部访问，则交给内部专用后端处理
+			log.Println("[intDef]", p.internalServer)
+			(&tcpproxy.DialProxy{
+				Addr:        p.internalServer,
+				DialTimeout: time.Second * 10,
+			}).HandleConn(c)
+			return
+		}
+	}
+	if p.defaultServer != "" { // 回落到默认后端
+		log.Println("[def]", p.defaultServer)
+		(&tcpproxy.DialProxy{
+			Addr:        p.defaultServer,
+			DialTimeout: time.Second * 10,
+		}).HandleConn(c)
+		return
+	}
+	log.Println("[def] rejected visit of", c.RemoteAddr().String())
+	c.Close() // 不是内部访问，并且没有配置外部使用的后端，则拒绝该连接
 }
 
 type HostMap map[string]host
@@ -132,11 +162,10 @@ func (this *HostMap) Match(r *bufio.Reader) (t tcpproxy.Target, hostname string)
 	}
 
 	// fallback to default
-	if config.Default != "" {
-		log.Println(hostname, "=> [def]", config.Default)
-		t = &tcpproxy.DialProxy{
-			DialTimeout: time.Second * 10,
-			Addr:        config.Default,
+	if config.Default != "" || config.DefaultInternal != "" {
+		t = &defaultProxy{
+			defaultServer:  config.Default,
+			internalServer: config.DefaultInternal,
 		}
 		fastMap[hostname] = t
 		return
@@ -320,7 +349,9 @@ func main() {
 			return
 		}
 		defer cntxt.Release()
-		go daemon.ServeSignals()
-		log.Println("Process exit with error", p.Run())
+		go func() {
+			log.Println("Process exit with error", p.Run())
+		}()
+		daemon.ServeSignals()
 	}
 }

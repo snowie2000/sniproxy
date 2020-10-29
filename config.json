@@ -1,7 +1,10 @@
 {
 	"Listen":":443",
+	"Hsts": true,
 	"tls": [
 		{"name": "gate.mactype.net", "value":"127.0.0.1:4443"},
 		{"name": "home.mactype.net", "value":"127.0.0.1:992"}
-	]
+	],
+	"Default": "127.0.0.1:444",
+	"DefaultInternal": "127.0.0.1:445"
 }
