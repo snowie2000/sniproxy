@@ -32,7 +32,7 @@ const (
 	TCP_FASTOPEN = 23
 	// For out-going connections.
 	TCP_FASTOPEN_CONNECT = 30
-	VERSION              = "v10.29"
+	VERSION              = "v10.31"
 )
 
 var (
@@ -249,10 +249,6 @@ func (c *connWriter) Header() http.Header {
 }
 
 func (c *connWriter) Write(b []byte) (int, error) {
-	if c.resp.Body == nil {
-		c.body = &bytes.Buffer{}
-		c.resp.Body = ioutil.NopCloser(c.body)
-	}
 	return c.body.Write(b)
 }
 
@@ -274,6 +270,7 @@ func (h *hstsRedirector) HandleConn(c net.Conn) {
 		req.URL.Scheme = "https"
 		req.URL.Host = req.Host
 		w := &connWriter{
+			body: &bytes.Buffer{},
 			resp: http.Response{
 				Proto:        "HTTP/1.1",
 				ProtoMajor:   1,
@@ -283,6 +280,7 @@ func (h *hstsRedirector) HandleConn(c net.Conn) {
 				Uncompressed: true,
 			},
 		}
+		w.resp.Body = ioutil.NopCloser(w.body)
 		http.Redirect(w, req, req.URL.String(), http.StatusMovedPermanently)
 		w.WriteTo(c)
 	}
