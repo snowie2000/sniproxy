@@ -9,7 +9,6 @@ import (
 	"flag"
 	"io/ioutil"
 	"log"
-	"mapset"
 	"net"
 	"net/http"
 	_ "net/http/pprof"
@@ -20,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	mapset "github.com/deckarep/golang-set"
 	"github.com/golang/glog"
 	"github.com/google/tcpproxy"
 	"github.com/sevlyar/go-daemon"
@@ -62,7 +62,8 @@ type hosts struct {
 	Tls             []host
 	Default         string
 	DefaultInternal string // 仅可以从内部访问的转发，可用于dns解锁
-	Hsts            bool   // true则443端口同时接受http和https，对http返回302
+	TcpNodelay      bool
+	Hsts            bool // true则443端口同时接受http和https，对http返回302
 }
 
 type defaultProxy struct {
@@ -86,6 +87,7 @@ func (p *defaultProxy) HandleConn(c net.Conn) {
 		log.Println("[def]", p.defaultServer)
 		(&tcpproxy.DialProxy{
 			Addr:        p.defaultServer,
+			TcpNodelay:  config.TcpNodelay,
 			DialTimeout: time.Second * 10,
 		}).HandleConn(c)
 		return
@@ -126,6 +128,7 @@ func (this *HostMap) Match(r *bufio.Reader) (t tcpproxy.Target, hostname string)
 		t = &tcpproxy.DialProxy{
 			DialTimeout:          time.Second * 10,
 			Addr:                 h.Value,
+			TcpNodelay:           config.TcpNodelay,
 			ProxyProtocolVersion: h.ProxyProtocolVersion,
 		}
 		fastMap[hostname] = t
@@ -141,6 +144,7 @@ func (this *HostMap) Match(r *bufio.Reader) (t tcpproxy.Target, hostname string)
 			t = &tcpproxy.DialProxy{
 				DialTimeout:          time.Second * 10,
 				Addr:                 h.Value,
+				TcpNodelay:           config.TcpNodelay,
 				ProxyProtocolVersion: h.ProxyProtocolVersion,
 			}
 			fastMap[hostname] = t
@@ -154,6 +158,7 @@ func (this *HostMap) Match(r *bufio.Reader) (t tcpproxy.Target, hostname string)
 			t = &tcpproxy.DialProxy{
 				DialTimeout:          time.Second * 10,
 				Addr:                 v.Value,
+				TcpNodelay:           config.TcpNodelay,
 				ProxyProtocolVersion: v.ProxyProtocolVersion,
 			}
 			fastMap[hostname] = t
@@ -321,7 +326,7 @@ func main() {
 		}
 	}
 	//enable pprof
-	go http.ListenAndServe("localhost:6666", nil)
+	//go http.ListenAndServe("localhost:6666", nil)
 
 	if bind, err := loadConfig(cfgpath); err != nil {
 		glog.Fatalln(err)
