@@ -125,9 +125,13 @@ func (this *HostMap) Match(r *bufio.Reader) (t tcpproxy.Target, hostname string)
 	self := *this
 	if h, ok := self[hostname]; ok {
 		log.Println(hostname, "=>", h.Value)
+		outaddr := h.Value
+		if outaddr == "auto" { // auto resolve target address
+			outaddr = hostname + ":443"
+		}
 		t = &tcpproxy.DialProxy{
 			DialTimeout:          time.Second * 10,
-			Addr:                 h.Value,
+			Addr:                 outaddr,
 			TcpNodelay:           config.TcpNodelay,
 			ProxyProtocolVersion: h.ProxyProtocolVersion,
 		}
@@ -141,9 +145,13 @@ func (this *HostMap) Match(r *bufio.Reader) (t tcpproxy.Target, hostname string)
 		wildhost := strings.Join(split, ".")
 		if h, ok := self[wildhost]; ok {
 			log.Println(wildhost, "=>", h.Value)
+			outaddr := h.Value
+			if outaddr == "auto" { // auto resolve target address
+				outaddr = hostname + ":443"
+			}
 			t = &tcpproxy.DialProxy{
 				DialTimeout:          time.Second * 10,
-				Addr:                 h.Value,
+				Addr:                 outaddr,
 				TcpNodelay:           config.TcpNodelay,
 				ProxyProtocolVersion: h.ProxyProtocolVersion,
 			}
@@ -155,9 +163,13 @@ func (this *HostMap) Match(r *bufio.Reader) (t tcpproxy.Target, hostname string)
 	for k, v := range suffixMap {
 		if strings.HasSuffix("."+hostname, k) {
 			log.Println("."+hostname, "=>", v.Value)
+			outaddr := v.Value
+			if outaddr == "auto" { // auto resolve target address
+				outaddr = hostname + ":443"
+			}
 			t = &tcpproxy.DialProxy{
 				DialTimeout:          time.Second * 10,
-				Addr:                 v.Value,
+				Addr:                 outaddr,
 				TcpNodelay:           config.TcpNodelay,
 				ProxyProtocolVersion: v.ProxyProtocolVersion,
 			}
@@ -210,7 +222,7 @@ func loadConfig(s string) (bind string, e error) {
 			}
 			ip = h.Value
 			_, _, err := net.SplitHostPort(ip)
-			if err == nil {
+			if err == nil || ip == "auto" {
 				if h.Proxied {
 					h.ProxyProtocolVersion = 2 // use ppv2 for now
 				} else {
