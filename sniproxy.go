@@ -32,6 +32,7 @@ const (
 	TCP_FASTOPEN = 23
 	// For out-going connections.
 	TCP_FASTOPEN_CONNECT = 30
+	TCP_QUICKACK         = 12
 	VERSION              = "v10.31"
 )
 
@@ -48,6 +49,7 @@ var (
 	cfgpath               string
 	config                hosts
 	p                     tcpproxy.Proxy
+	quickDial             = new(net.Dialer)
 )
 
 type host struct {
@@ -62,8 +64,7 @@ type hosts struct {
 	Tls             []host
 	Default         string
 	DefaultInternal string // 仅可以从内部访问的转发，可用于dns解锁
-	TcpNodelay      bool
-	Hsts            bool // true则443端口同时接受http和https，对http返回302
+	Hsts            bool   // true则443端口同时接受http和https，对http返回302
 }
 
 type defaultProxy struct {
@@ -79,6 +80,7 @@ func (p *defaultProxy) HandleConn(c net.Conn) {
 			(&tcpproxy.DialProxy{
 				Addr:        p.internalServer,
 				DialTimeout: time.Second * 10,
+				DialContext: quickDial.DialContext,
 			}).HandleConn(c)
 			return
 		}
@@ -87,8 +89,8 @@ func (p *defaultProxy) HandleConn(c net.Conn) {
 		log.Println("[def]", p.defaultServer)
 		(&tcpproxy.DialProxy{
 			Addr:        p.defaultServer,
-			TcpNodelay:  config.TcpNodelay,
 			DialTimeout: time.Second * 10,
+			DialContext: quickDial.DialContext,
 		}).HandleConn(c)
 		return
 	}
@@ -132,8 +134,8 @@ func (this *HostMap) Match(r *bufio.Reader) (t tcpproxy.Target, hostname string)
 		t = &tcpproxy.DialProxy{
 			DialTimeout:          time.Second * 10,
 			Addr:                 outaddr,
-			TcpNodelay:           config.TcpNodelay,
 			ProxyProtocolVersion: h.ProxyProtocolVersion,
+			DialContext:          quickDial.DialContext,
 		}
 		fastMap[hostname] = t
 		return
@@ -152,8 +154,8 @@ func (this *HostMap) Match(r *bufio.Reader) (t tcpproxy.Target, hostname string)
 			t = &tcpproxy.DialProxy{
 				DialTimeout:          time.Second * 10,
 				Addr:                 outaddr,
-				TcpNodelay:           config.TcpNodelay,
 				ProxyProtocolVersion: h.ProxyProtocolVersion,
+				DialContext:          quickDial.DialContext,
 			}
 			fastMap[hostname] = t
 			return
@@ -170,8 +172,8 @@ func (this *HostMap) Match(r *bufio.Reader) (t tcpproxy.Target, hostname string)
 			t = &tcpproxy.DialProxy{
 				DialTimeout:          time.Second * 10,
 				Addr:                 outaddr,
-				TcpNodelay:           config.TcpNodelay,
 				ProxyProtocolVersion: v.ProxyProtocolVersion,
+				DialContext:          quickDial.DialContext,
 			}
 			fastMap[hostname] = t
 			return
@@ -339,6 +341,13 @@ func main() {
 	}
 	//enable pprof
 	//go http.ListenAndServe("localhost:6666", nil)
+
+	// prepare dialer context
+	quickDial.Control = func(network, address string, c syscall.RawConn) error {
+		return c.Control(func(fd uintptr) {
+			syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, TCP_QUICKACK, 1)
+		})
+	}
 
 	if bind, err := loadConfig(cfgpath); err != nil {
 		glog.Fatalln(err)

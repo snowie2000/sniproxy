@@ -336,9 +336,6 @@ type DialProxy struct {
 	// Addr is the TCP address to proxy to.
 	Addr string
 
-	// Tcp no delay flag
-	TcpNodelay bool
-
 	// KeepAlivePeriod sets the period between TCP keep alives.
 	// If zero, a default is used. To disable, use a negative number.
 	// The keep-alive is used for both the client connection and
@@ -396,11 +393,6 @@ func (dp *DialProxy) HandleConn(src net.Conn) {
 		return
 	}
 	defer goCloseConn(dst)
-
-	// set tcp no delay
-	if c, ok := UnderlyingConn(src).(*net.TCPConn); ok {
-		c.SetNoDelay(dp.TcpNodelay)
-	}
 
 	if err = dp.sendProxyHeader(dst, src); err != nil {
 		dp.onDialError()(src, err)
