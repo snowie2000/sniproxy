@@ -219,9 +219,6 @@ func loadConfig(s string) (bind string, e error) {
 		fastMapNilRec = 0
 		var ip string
 		for _, h := range config.Tls {
-			if h.Name == "" {
-				continue
-			}
 			ip = h.Value
 			_, _, err := net.SplitHostPort(ip)
 			if err == nil || ip == "auto" {
@@ -230,7 +227,7 @@ func loadConfig(s string) (bind string, e error) {
 				} else {
 					h.ProxyProtocolVersion = 0
 				}
-				if []byte(h.Name)[0] == '.' {
+				if len(h.Name) > 0 && []byte(h.Name)[0] == '.' {
 					suffixMap[strings.ToLower(h.Name)] = h
 				} else {
 					hostMap[strings.ToLower(h.Name)] = h
