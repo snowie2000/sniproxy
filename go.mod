@@ -1,6 +1,6 @@
 module sniproxy
 
-go 1.16
+go 1.18
 
 replace github.com/google/tcpproxy => ./deps/google/tcpproxy
 

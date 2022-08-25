@@ -33,7 +33,7 @@ const (
 	// For out-going connections.
 	TCP_FASTOPEN_CONNECT = 30
 	TCP_QUICKACK         = 12
-	VERSION              = "v10.31"
+	VERSION              = "v08.19"
 )
 
 var (
@@ -62,14 +62,16 @@ type host struct {
 type hosts struct {
 	Listen          string
 	Tls             []host
+	Proxied         bool
 	Default         string
 	DefaultInternal string // 仅可以从内部访问的转发，可用于dns解锁
 	Hsts            bool   // true则443端口同时接受http和https，对http返回302
 }
 
 type defaultProxy struct {
-	defaultServer  string
-	internalServer string
+	defaultServer        string
+	internalServer       string
+	proxyProtocolVersion int
 }
 
 func (p *defaultProxy) HandleConn(c net.Conn) {
@@ -78,9 +80,9 @@ func (p *defaultProxy) HandleConn(c net.Conn) {
 		if err == nil && addr.IP.IsLoopback() { // 符合内部访问，则交给内部专用后端处理
 			log.Println("[intDef]", p.internalServer)
 			(&tcpproxy.DialProxy{
-				Addr:        p.internalServer,
-				DialTimeout: time.Second * 10,
-				DialContext: quickDial.DialContext,
+				Addr:                 p.internalServer,
+				DialTimeout:          time.Second * 10,
+				DialContext:          quickDial.DialContext,
 			}).HandleConn(c)
 			return
 		}
@@ -91,6 +93,7 @@ func (p *defaultProxy) HandleConn(c net.Conn) {
 			Addr:        p.defaultServer,
 			DialTimeout: time.Second * 10,
 			DialContext: quickDial.DialContext,
+			ProxyProtocolVersion: p.proxyProtocolVersion,
 		}).HandleConn(c)
 		return
 	}
@@ -185,6 +188,7 @@ func (this *HostMap) Match(r *bufio.Reader) (t tcpproxy.Target, hostname string)
 		t = &defaultProxy{
 			defaultServer:  config.Default,
 			internalServer: config.DefaultInternal,
+			proxyProtocolVersion: IfThen[int](config.Proxied, 2, 0),
 		}
 		fastMap[hostname] = t
 		return
@@ -375,4 +379,11 @@ func main() {
 		}()
 		daemon.ServeSignals()
 	}
+}
+
+func IfThen[T interface{}](condition bool, valueIfTrue T, valueIfFalse T) T {
+	if condition {
+		return valueIfTrue
+	}
+	return valueIfFalse
 }
