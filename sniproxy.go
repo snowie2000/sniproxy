@@ -381,7 +381,7 @@ func main() {
 	}
 }
 
-func IfThen[T interface{}](condition bool, valueIfTrue T, valueIfFalse T) T {
+func IfThen[T any](condition bool, valueIfTrue T, valueIfFalse T) T {
 	if condition {
 		return valueIfTrue
 	}
