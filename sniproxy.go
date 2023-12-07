@@ -77,12 +77,12 @@ type defaultProxy struct {
 func (p *defaultProxy) HandleConn(c net.Conn) {
 	if p.internalServer != "" { // 有内部专用后端
 		addr, err := net.ResolveTCPAddr(c.RemoteAddr().Network(), c.RemoteAddr().String())
-		if err == nil && addr.IP.IsLoopback() { // 符合内部访问，则交给内部专用后端处理
+		if err == nil && (addr.IP.IsLoopback() || addr.IP.IsPrivate()) { // 符合内部访问，则交给内部专用后端处理
 			log.Println("[intDef]", p.internalServer)
 			(&tcpproxy.DialProxy{
-				Addr:                 p.internalServer,
-				DialTimeout:          time.Second * 10,
-				DialContext:          quickDial.DialContext,
+				Addr:        p.internalServer,
+				DialTimeout: time.Second * 10,
+				DialContext: quickDial.DialContext,
 			}).HandleConn(c)
 			return
 		}
@@ -90,9 +90,9 @@ func (p *defaultProxy) HandleConn(c net.Conn) {
 	if p.defaultServer != "" { // 回落到默认后端
 		log.Println("[def]", p.defaultServer)
 		(&tcpproxy.DialProxy{
-			Addr:        p.defaultServer,
-			DialTimeout: time.Second * 10,
-			DialContext: quickDial.DialContext,
+			Addr:                 p.defaultServer,
+			DialTimeout:          time.Second * 10,
+			DialContext:          quickDial.DialContext,
 			ProxyProtocolVersion: p.proxyProtocolVersion,
 		}).HandleConn(c)
 		return
@@ -186,8 +186,8 @@ func (this *HostMap) Match(r *bufio.Reader) (t tcpproxy.Target, hostname string)
 	// fallback to default
 	if config.Default != "" || config.DefaultInternal != "" {
 		t = &defaultProxy{
-			defaultServer:  config.Default,
-			internalServer: config.DefaultInternal,
+			defaultServer:        config.Default,
+			internalServer:       config.DefaultInternal,
 			proxyProtocolVersion: IfThen[int](config.Proxied, 2, 0),
 		}
 		fastMap[hostname] = t
