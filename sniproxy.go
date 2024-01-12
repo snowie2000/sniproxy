@@ -49,6 +49,7 @@ var (
 	cfgpath               string
 	config                hosts
 	p                     tcpproxy.Proxy
+	hostIPList            = mapset.NewSet()
 	quickDial             = new(net.Dialer)
 )
 
@@ -77,7 +78,7 @@ type defaultProxy struct {
 func (p *defaultProxy) HandleConn(c net.Conn) {
 	if p.internalServer != "" { // 有内部专用后端
 		addr, err := net.ResolveTCPAddr(c.RemoteAddr().Network(), c.RemoteAddr().String())
-		if err == nil && (addr.IP.IsLoopback() || addr.IP.IsPrivate()) { // 符合内部访问，则交给内部专用后端处理
+		if err == nil && (addr.IP.IsLoopback() || hostIPList.Contains(addr.IP.String())) { // 符合内部访问，则交给内部专用后端处理
 			log.Println("[intDef]", p.internalServer)
 			(&tcpproxy.DialProxy{
 				Addr:        p.internalServer,
@@ -362,6 +363,13 @@ func main() {
 	}
 	glog.Infoln("Sniproxy (google tcpproxy version)", VERSION, "started")
 
+	// collecting host NIC addresses
+	iplist := hostAddress()
+	for _, ip := range iplist {
+		hostIPList.Add(ip)
+		glog.Infoln("Found NIC:", ip)
+	}
+
 	if foreground {
 		p.Run()
 	} else {
@@ -379,6 +387,27 @@ func main() {
 		}()
 		daemon.ServeSignals()
 	}
+}
+
+func hostAddress() (ips []string) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return
+	}
+	for _, i := range ifaces {
+		if addrs, err := i.Addrs(); err == nil {
+			for _, addr := range addrs {
+				switch v := addr.(type) {
+				case *net.IPNet:
+					ips = append(ips, v.IP.String())
+				case *net.IPAddr:
+					ips = append(ips, v.IP.String())
+				}
+				// process IP address
+			}
+		}
+	}
+	return
 }
 
 func IfThen[T any](condition bool, valueIfTrue T, valueIfFalse T) T {
