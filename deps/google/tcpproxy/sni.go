@@ -158,6 +158,31 @@ func tryACME(ctx context.Context, ch chan<- Target, dest Target, sni string) {
 	ret = dest
 }
 
+func getClientHello(br *bufio.Reader) (ret *tls.ClientHelloInfo, err error) {
+	eNoTls := errors.New("invalid tls connection")
+	const recordHeaderLen = 5
+	hdr, err := br.Peek(recordHeaderLen)
+	if err != nil {
+		return nil, err
+	}
+	const recordTypeHandshake = 0x16
+	if hdr[0] != recordTypeHandshake {
+		return nil, eNoTls // Not TLS.
+	}
+	recLen := int(hdr[3])<<8 | int(hdr[4]) // ignoring version in hdr[1:3]
+	helloBytes, err := br.Peek(recordHeaderLen + recLen)
+	if err != nil {
+		return nil, err
+	}
+	tls.Server(sniSniffConn{r: bytes.NewReader(helloBytes)}, &tls.Config{
+		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+			ret = hello
+			return nil, nil
+		},
+	}).Handshake()
+	return ret, nil
+}
+
 // clientHelloServerName returns the SNI server name inside the TLS ClientHello,
 // without consuming any bytes from br.
 // On any error, the empty string is returned.

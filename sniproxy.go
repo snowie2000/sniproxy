@@ -14,6 +14,7 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -57,6 +58,7 @@ type host struct {
 	Name                 string
 	Value                string
 	ProxyProtocolVersion int
+	Acme                 bool
 	Proxied              bool // true则传递proxy protocol v2报头，否则为直连
 }
 
@@ -104,13 +106,8 @@ func (p *defaultProxy) HandleConn(c net.Conn) {
 
 type HostMap map[string]host
 
-func (this *HostMap) Match(r *bufio.Reader) (t tcpproxy.Target, hostname string) {
-	sni, err := tcpproxy.ClientHelloServerName(r)
-	if err != nil {
-		return nil, ""
-	}
-	hostname = strings.ToLower(sni)
-
+func (this *HostMap) matchHost(hostname string) (t tcpproxy.Target, found bool) {
+	found = true
 	// try fast cache first
 	if func() bool {
 		fastMapLock.RLock()
@@ -184,12 +181,32 @@ func (this *HostMap) Match(r *bufio.Reader) (t tcpproxy.Target, hostname string)
 		}
 	}
 
+	return nil, false // no match
+}
+
+func (this *HostMap) Match(r *bufio.Reader) (t tcpproxy.Target, hostname string) {
+	hello, err := tcpproxy.ClientHello(r)
+	if err != nil {
+		return nil, ""
+	}
+	isAcme := hello.SupportedProtos != nil && slices.Contains(hello.SupportedProtos, "acme-tls/1")
+	hostname = IfThen(isAcme, strings.ToLower(hello.ServerName+"@acme"), strings.ToLower(hello.ServerName))
+	altname := IfThen(isAcme, strings.ToLower(hello.ServerName), "")
+
+	if t, found := this.matchHost(hostname); found {
+		return t, hello.ServerName
+	}
+	if altname != "" {
+		if t, found := this.matchHost(altname); found {
+			return t, hello.ServerName
+		}
+	}
 	// fallback to default
 	if config.Default != "" || config.DefaultInternal != "" {
 		t = &defaultProxy{
 			defaultServer:        config.Default,
 			internalServer:       config.DefaultInternal,
-			proxyProtocolVersion: IfThen[int](config.Proxied, 2, 0),
+			proxyProtocolVersion: IfThen(config.Proxied, 2, 0),
 		}
 		fastMap[hostname] = t
 		return
@@ -232,10 +249,11 @@ func loadConfig(s string) (bind string, e error) {
 				} else {
 					h.ProxyProtocolVersion = 0
 				}
+				dest := IfThen[string](h.Acme, strings.ToLower(h.Name+"@acme"), strings.ToLower(h.Name))
 				if len(h.Name) > 0 && []byte(h.Name)[0] == '.' {
-					suffixMap[strings.ToLower(h.Name)] = h
+					suffixMap[dest] = h
 				} else {
-					hostMap[strings.ToLower(h.Name)] = h
+					hostMap[dest] = h
 				}
 			}
 		}
