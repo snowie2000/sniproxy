@@ -189,7 +189,7 @@ func (this *HostMap) Match(r *bufio.Reader) (t tcpproxy.Target, hostname string)
 	if err != nil {
 		return nil, ""
 	}
-	isAcme := hello.SupportedProtos != nil && slices.Contains(hello.SupportedProtos, "acme-tls/1")
+	isAcme := hello != nil && hello.SupportedProtos != nil && slices.Contains(hello.SupportedProtos, "acme-tls/1")
 	hostname = IfThen(isAcme, strings.ToLower(hello.ServerName+"@acme"), strings.ToLower(hello.ServerName))
 	altname := IfThen(isAcme, strings.ToLower(hello.ServerName), "")
 

@@ -180,6 +180,9 @@ func getClientHello(br *bufio.Reader) (ret *tls.ClientHelloInfo, err error) {
 			return nil, nil
 		},
 	}).Handshake()
+	if ret == nil {
+		return nil, eNoTls
+	}
 	return ret, nil
 }
 
