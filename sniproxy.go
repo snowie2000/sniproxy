@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io/ioutil"
 	"log"
 	"net"
@@ -77,6 +78,59 @@ type defaultProxy struct {
 	proxyProtocolVersion int
 }
 
+const (
+	protoUnknown = 0
+	protoHttp    = 1
+	protoHttps   = 2
+)
+
+func getStreamType(r *bufio.Reader) (int, error) {
+	// Peek the first byte to determine protocol
+	// We use a small peek first to avoid issues with empty buffers
+	protoPeek, err := r.Peek(1)
+	if err != nil {
+		return protoUnknown, err
+	}
+
+	// 0x16 is the TLS Handshake record type
+	if protoPeek[0] == 0x16 {
+		return protoHttps, nil
+	}
+
+	if protoPeek[0] >= 0x32 && protoPeek[0] <= 0x7e {
+		return protoHttp, nil
+	}
+	return protoUnknown, fmt.Errorf("unknown proto: %d", protoPeek[0])
+}
+
+func peekHTTPHost(r *bufio.Reader) (string, error) {
+	// We peek a reasonable amount of data for headers (usually 4KB is the default bufio size)
+	// Peek returns a slice pointing to the internal buffer; no data is moved.
+	data, err := r.Peek(r.Size())
+	if err != nil && err != bufio.ErrBufferFull {
+		return "", err
+	}
+
+	// Look for "Host:" header.
+	// Note: We search for "\nHost:" to ensure we are at the start of a line.
+	// We convert to lowercase for case-insensitive matching.
+	content := string(data)
+	lines := strings.Split(content, "\r\n")
+
+	for _, line := range lines {
+		if strings.HasPrefix(strings.ToLower(line), "host:") {
+			host := strings.TrimSpace(line[5:])
+			// Strip port if present (e.g., "example.com:8080")
+			if strings.Contains(host, ":") {
+				host = strings.Split(host, ":")[0]
+			}
+			return host, nil
+		}
+	}
+
+	return "", errors.New("host header not found in peeked buffer")
+}
+
 func (p *defaultProxy) HandleConn(c net.Conn) {
 	if p.internalServer != "" { // 有内部专用后端
 		addr, err := net.ResolveTCPAddr(c.RemoteAddr().Network(), c.RemoteAddr().String())
@@ -106,7 +160,7 @@ func (p *defaultProxy) HandleConn(c net.Conn) {
 
 type HostMap map[string]host
 
-func (this *HostMap) matchHost(hostname string) (t tcpproxy.Target, found bool) {
+func (this *HostMap) matchHost(hostname string, port int) (t tcpproxy.Target, found bool) {
 	found = true
 	// try fast cache first
 	if func() bool {
@@ -130,7 +184,7 @@ func (this *HostMap) matchHost(hostname string) (t tcpproxy.Target, found bool) 
 		log.Println(hostname, "=>", h.Value)
 		outaddr := h.Value
 		if outaddr == "auto" { // auto resolve target address
-			outaddr = hostname + ":443"
+			outaddr = fmt.Sprintf("%s:%d", hostname, port)
 		}
 		t = &tcpproxy.DialProxy{
 			DialTimeout:          time.Second * 10,
@@ -184,21 +238,40 @@ func (this *HostMap) matchHost(hostname string) (t tcpproxy.Target, found bool) 
 	return nil, false // no match
 }
 
-func (this *HostMap) Match(r *bufio.Reader) (t tcpproxy.Target, hostname string) {
-	hello, err := tcpproxy.ClientHello(r)
-	if err != nil {
-		return nil, ""
+func (this *HostMap) Match(r *bufio.Reader) (t tcpproxy.Target, targetHostName string) {
+	altname := ""
+	hostname := ""
+	srcport := 0
+	protoType, err := getStreamType(r)
+	switch protoType {
+	case protoHttp:
+		hostname, err = peekHTTPHost(r)
+		if err != nil {
+			return nil, ""
+		}
+		targetHostName = hostname
+		srcport = 80
+	case protoHttps:
+		hello, err := tcpproxy.ClientHello(r)
+		if err != nil {
+			return nil, ""
+		}
+		isAcme := hello != nil && hello.SupportedProtos != nil && slices.Contains(hello.SupportedProtos, "acme-tls/1")
+		hostname = IfThen(isAcme, strings.ToLower(hello.ServerName+"@acme"), strings.ToLower(hello.ServerName))
+		altname = IfThen(isAcme, strings.ToLower(hello.ServerName), "")
+		targetHostName = hello.ServerName
+		srcport = 443
+	default:
+		log.Println("unknown protocol", err)
+		return nil, "" // unknown protocol
 	}
-	isAcme := hello != nil && hello.SupportedProtos != nil && slices.Contains(hello.SupportedProtos, "acme-tls/1")
-	hostname = IfThen(isAcme, strings.ToLower(hello.ServerName+"@acme"), strings.ToLower(hello.ServerName))
-	altname := IfThen(isAcme, strings.ToLower(hello.ServerName), "")
 
-	if t, found := this.matchHost(hostname); found {
-		return t, hello.ServerName
+	if t, found := this.matchHost(hostname, srcport); found {
+		return t, targetHostName
 	}
 	if altname != "" {
-		if t, found := this.matchHost(altname); found {
-			return t, hello.ServerName
+		if t, found := this.matchHost(altname, srcport); found {
+			return t, targetHostName
 		}
 	}
 	// fallback to default
