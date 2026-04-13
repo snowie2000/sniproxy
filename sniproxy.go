@@ -12,12 +12,12 @@ import (
 	"log"
 	"net"
 	"net/http"
-	_ "net/http/pprof"
+
+	// _ "net/http/pprof"
+	"net/url"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -25,6 +25,7 @@ import (
 	"github.com/golang/glog"
 	"github.com/google/tcpproxy"
 	"github.com/sevlyar/go-daemon"
+	"golang.org/x/net/proxy"
 )
 
 const (
@@ -38,6 +39,72 @@ const (
 	VERSION              = "v08.19"
 )
 
+type Dialer func(ctx context.Context, network, address string) (net.Conn, error)
+
+func makeProxyDialer(proxyServer string) Dialer {
+	if strings.HasPrefix(proxyServer, "http://") {
+		u, e := url.Parse(proxyServer)
+		if e == nil {
+			proxyServer = u.Host
+			return func(ctx context.Context, network, address string) (net.Conn, error) {
+				log.Println("Connect via proxy:", proxyServer)
+				// 1. Dial the proxy server itself
+				var d net.Dialer
+				conn, err := d.DialContext(ctx, "tcp", proxyServer)
+				if err != nil {
+					return nil, err
+				}
+
+				// 2. Send the HTTP CONNECT request
+				req, err := http.NewRequestWithContext(ctx, "CONNECT", "http://"+address, nil)
+				if err != nil {
+					conn.Close()
+					return nil, err
+				}
+				req.Write(conn)
+
+				// 3. Read the proxy response
+				resp, err := http.ReadResponse(bufio.NewReader(conn), req)
+				if err != nil {
+					conn.Close()
+					return nil, err
+				}
+				if resp.StatusCode != http.StatusOK {
+					conn.Close()
+					return nil, fmt.Errorf("proxy refused connection: %s", resp.Status)
+				}
+
+				// 4. Return the hijacked connection to tcpproxy
+				return conn, nil
+			}
+		}
+	}
+	if strings.HasPrefix(proxyServer, "socks5://") {
+		u, e := url.Parse(proxyServer)
+		if e == nil {
+			proxyServer = u.Host
+			return func(ctx context.Context, network, address string) (net.Conn, error) {
+				log.Println("Connect via proxy:", proxyServer)
+				// Create a SOCKS5 dialer
+				// proxy.Direct is the forwarder used for the initial connection to the proxy itself
+				d, err := proxy.SOCKS5("tcp", proxyServer, nil, proxy.Direct)
+				if err != nil {
+					return nil, err
+				}
+
+				// If the dialer supports Context (it usually does), use it
+				if cd, ok := d.(proxy.ContextDialer); ok {
+					return cd.DialContext(ctx, network, address)
+				}
+
+				// Fallback for dialers without context support
+				return d.Dial(network, address)
+			}
+		}
+	}
+	return (&net.Dialer{}).DialContext
+}
+
 var (
 	port                  string     = "443"
 	errInvaildClientHello error      = errors.New("Invalid TLS ClientHello data")
@@ -45,20 +112,21 @@ var (
 	randset               mapset.Set = mapset.NewSet()
 	hostMap               HostMap    // extact matches and wildcard matches
 	suffixMap             HostMap    //suffix matches (for hosts start with .)
-	fastMap               map[string]tcpproxy.Target
-	fastMapLock           sync.RWMutex
-	fastMapNilRec         int = 0
+	httpMap               HttpMap
+	httpSuffixMap         HttpMap
 	cfgpath               string
 	config                hosts
 	p                     tcpproxy.Proxy
 	hostIPList            = mapset.NewSet()
 	quickDial             = new(net.Dialer)
+	proxyServers          = make(map[string]Dialer)
 )
 
 type host struct {
 	Name                 string
 	Value                string
 	ProxyProtocolVersion int
+	ProxyServer          string
 	Acme                 bool
 	Proxied              bool // true则传递proxy protocol v2报头，否则为直连
 }
@@ -70,6 +138,7 @@ type hosts struct {
 	Default         string
 	DefaultInternal string // 仅可以从内部访问的转发，可用于dns解锁
 	Hsts            bool   // true则443端口同时接受http和https，对http返回302
+	HttpProxy       bool   // true则开启80端口http代理功能，和hsts冲突
 }
 
 type defaultProxy struct {
@@ -83,6 +152,16 @@ const (
 	protoHttp    = 1
 	protoHttps   = 2
 )
+
+func getProxy(proxyStr string) Dialer {
+	if proxyStr == "" {
+		return quickDial.DialContext
+	}
+	if p, ok := proxyServers[proxyStr]; ok {
+		return p
+	}
+	return quickDial.DialContext
+}
 
 func getStreamType(r *bufio.Reader) (int, error) {
 	// Peek the first byte to determine protocol
@@ -101,34 +180,6 @@ func getStreamType(r *bufio.Reader) (int, error) {
 		return protoHttp, nil
 	}
 	return protoUnknown, fmt.Errorf("unknown proto: %d", protoPeek[0])
-}
-
-func peekHTTPHost(r *bufio.Reader) (string, error) {
-	// We peek a reasonable amount of data for headers (usually 4KB is the default bufio size)
-	// Peek returns a slice pointing to the internal buffer; no data is moved.
-	data, err := r.Peek(r.Size())
-	if err != nil && err != bufio.ErrBufferFull {
-		return "", err
-	}
-
-	// Look for "Host:" header.
-	// Note: We search for "\nHost:" to ensure we are at the start of a line.
-	// We convert to lowercase for case-insensitive matching.
-	content := string(data)
-	lines := strings.Split(content, "\r\n")
-
-	for _, line := range lines {
-		if strings.HasPrefix(strings.ToLower(line), "host:") {
-			host := strings.TrimSpace(line[5:])
-			// Strip port if present (e.g., "example.com:8080")
-			if strings.Contains(host, ":") {
-				host = strings.Split(host, ":")[0]
-			}
-			return host, nil
-		}
-	}
-
-	return "", errors.New("host header not found in peeked buffer")
 }
 
 func (p *defaultProxy) HandleConn(c net.Conn) {
@@ -158,160 +209,24 @@ func (p *defaultProxy) HandleConn(c net.Conn) {
 	c.Close() // 不是内部访问，并且没有配置外部使用的后端，则拒绝该连接
 }
 
-type HostMap map[string]host
-
-func (this *HostMap) matchHost(hostname string, port int) (t tcpproxy.Target, found bool) {
-	found = true
-	// try fast cache first
-	if func() bool {
-		fastMapLock.RLock()
-		defer fastMapLock.RUnlock()
-		if target, ok := fastMap[hostname]; ok {
-			log.Println("[hit]", hostname)
-			t = target
-			return true
-		}
-		return false
-	}() {
-		return
-	}
-
-	fastMapLock.Lock()
-	defer fastMapLock.Unlock()
-	// firstly, try exact match
-	self := *this
-	if h, ok := self[hostname]; ok {
-		log.Println(hostname, "=>", h.Value)
-		outaddr := h.Value
-		if outaddr == "auto" { // auto resolve target address
-			outaddr = fmt.Sprintf("%s:%d", hostname, port)
-		}
-		t = &tcpproxy.DialProxy{
-			DialTimeout:          time.Second * 10,
-			Addr:                 outaddr,
-			ProxyProtocolVersion: h.ProxyProtocolVersion,
-			DialContext:          quickDial.DialContext,
-		}
-		fastMap[hostname] = t
-		return
-	}
-	// then wildcard match
-	split := strings.SplitAfterN(hostname, ".", 2)
-	if len(split) > 0 {
-		split[0] = "*"
-		wildhost := strings.Join(split, ".")
-		if h, ok := self[wildhost]; ok {
-			log.Println(wildhost, "=>", h.Value)
-			outaddr := h.Value
-			if outaddr == "auto" { // auto resolve target address
-				outaddr = hostname + ":443"
-			}
-			t = &tcpproxy.DialProxy{
-				DialTimeout:          time.Second * 10,
-				Addr:                 outaddr,
-				ProxyProtocolVersion: h.ProxyProtocolVersion,
-				DialContext:          quickDial.DialContext,
-			}
-			fastMap[hostname] = t
-			return
-		}
-	}
-	// then suffix match
-	for k, v := range suffixMap {
-		if strings.HasSuffix("."+hostname, k) {
-			log.Println("."+hostname, "=>", v.Value)
-			outaddr := v.Value
-			if outaddr == "auto" { // auto resolve target address
-				outaddr = hostname + ":443"
-			}
-			t = &tcpproxy.DialProxy{
-				DialTimeout:          time.Second * 10,
-				Addr:                 outaddr,
-				ProxyProtocolVersion: v.ProxyProtocolVersion,
-				DialContext:          quickDial.DialContext,
-			}
-			fastMap[hostname] = t
-			return
-		}
-	}
-
-	return nil, false // no match
-}
-
-func (this *HostMap) Match(r *bufio.Reader) (t tcpproxy.Target, targetHostName string) {
-	altname := ""
-	hostname := ""
-	srcport := 0
-	protoType, err := getStreamType(r)
-	switch protoType {
-	case protoHttp:
-		hostname, err = peekHTTPHost(r)
-		if err != nil {
-			return nil, ""
-		}
-		targetHostName = hostname
-		srcport = 80
-	case protoHttps:
-		hello, err := tcpproxy.ClientHello(r)
-		if err != nil {
-			return nil, ""
-		}
-		isAcme := hello != nil && hello.SupportedProtos != nil && slices.Contains(hello.SupportedProtos, "acme-tls/1")
-		hostname = IfThen(isAcme, strings.ToLower(hello.ServerName+"@acme"), strings.ToLower(hello.ServerName))
-		altname = IfThen(isAcme, strings.ToLower(hello.ServerName), "")
-		targetHostName = hello.ServerName
-		srcport = 443
-	default:
-		log.Println("unknown protocol", err)
-		return nil, "" // unknown protocol
-	}
-
-	if t, found := this.matchHost(hostname, srcport); found {
-		return t, targetHostName
-	}
-	if altname != "" {
-		if t, found := this.matchHost(altname, srcport); found {
-			return t, targetHostName
-		}
-	}
-	// fallback to default
-	if config.Default != "" || config.DefaultInternal != "" {
-		t = &defaultProxy{
-			defaultServer:        config.Default,
-			internalServer:       config.DefaultInternal,
-			proxyProtocolVersion: IfThen(config.Proxied, 2, 0),
-		}
-		fastMap[hostname] = t
-		return
-	} else {
-		if fastMapNilRec > 10000 { // if more than 10000 entries cached in the fastmap, clean nil entries.
-			for k, v := range fastMap {
-				if v == nil {
-					delete(fastMap, k)
-				}
-			}
-			fastMapNilRec = 0
-		}
-		fastMapNilRec++ //no need to worry about cocurrency, we had fastMapLock mutex in front.
-		fastMap[hostname] = nil
-		return nil, ""
-	}
-}
-
 func loadConfig(s string) (bind string, e error) {
 	if s == "" {
 		p, _ := filepath.Abs(filepath.Dir(os.Args[0]))
 		s = p + string(os.PathSeparator) + "config.json"
 	}
-	if f, err := ioutil.ReadFile(s); err == nil {
+	if f, err := os.ReadFile(s); err == nil {
 		if err = json.Unmarshal(f, &config); err != nil {
 			return "", err
 		}
 
+		// rebuild cache on load
 		hostMap = make(HostMap)
 		suffixMap = make(HostMap)
+		httpMap = make(HttpMap)
+		httpSuffixMap = make(HttpMap)
 		fastMap = make(map[string]tcpproxy.Target)
-		fastMapNilRec = 0
+		fastHttpMap = make(map[string]tcpproxy.Target)
+
 		var ip string
 		for _, h := range config.Tls {
 			ip = h.Value
@@ -322,11 +237,16 @@ func loadConfig(s string) (bind string, e error) {
 				} else {
 					h.ProxyProtocolVersion = 0
 				}
-				dest := IfThen[string](h.Acme, strings.ToLower(h.Name+"@acme"), strings.ToLower(h.Name))
+				if h.ProxyServer != "" && proxyServers[h.ProxyServer] == nil {
+					proxyServers[h.ProxyServer] = makeProxyDialer(h.ProxyServer)
+				}
+				dest := IfThen(h.Acme, strings.ToLower(h.Name+"@acme"), strings.ToLower(h.Name))
 				if len(h.Name) > 0 && []byte(h.Name)[0] == '.' {
 					suffixMap[dest] = h
+					httpSuffixMap[dest] = h
 				} else {
 					hostMap[dest] = h
+					httpMap[dest] = h
 				}
 			}
 		}
@@ -446,7 +366,10 @@ func main() {
 		glog.Fatalln(err)
 	} else {
 		p.AddCustomRoute(bind, &hostMap)
-		if config.Hsts {
+		if config.HttpProxy {
+			host, _, _ := net.SplitHostPort(bind)
+			p.AddCustomRoute(host+":80", &httpMap)
+		} else if config.Hsts {
 			p.AddHTTPHostMatchRoute(bind, func(ctx context.Context, hostname string) bool {
 				return hostname != ""
 			}, &hstsRedirector{})
