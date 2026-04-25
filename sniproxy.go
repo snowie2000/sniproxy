@@ -117,6 +117,7 @@ var (
 	cfgpath               string
 	config                hosts
 	p                     tcpproxy.Proxy
+	blackHole             = &BlackHoleTarget{}
 	hostIPList            = mapset.NewSet()
 	quickDial             = new(net.Dialer)
 	proxyServers          = make(map[string]Dialer)
@@ -316,6 +317,30 @@ func (h *hstsRedirector) HandleConn(c net.Conn) {
 		http.Redirect(w, req, req.URL.String(), http.StatusMovedPermanently)
 		w.WriteTo(c)
 	}
+}
+
+func isLoopUDP(targetAddr string) bool {
+	resolved, _ := net.ResolveUDPAddr("udp", targetAddr)
+	log.Println(targetAddr, "resolves to", resolved)
+	if resolved.IP.IsLoopback() || resolved.IP.IsPrivate() {
+		return false // we actually allow direct connection to localhost
+	}
+	// 1. Listen on a random UDP port
+	pc, _ := net.ListenPacket("udp", ":0")
+	defer pc.Close()
+	_, port, _ := net.SplitHostPort(pc.LocalAddr().String())
+
+	// 2. Send the "Bottle" to the target
+	nonce := []byte(fmt.Sprintf("loop-check-%s-%d", port, time.Now().UnixNano()))
+	targetUDP, _ := net.ResolveUDPAddr("udp", net.JoinHostPort(resolved.IP.String(), port))
+	pc.WriteTo(nonce, targetUDP)
+
+	// 3. Wait a tiny bit to see if it comes back to us
+	buffer := make([]byte, 64)
+	pc.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	n, _, err := pc.ReadFrom(buffer)
+
+	return err == nil && string(buffer[:n]) == string(nonce)
 }
 
 func main() {

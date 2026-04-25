@@ -46,11 +46,15 @@ func (this *HostMap) matchHost(hostname string, port int) (t tcpproxy.Target, fo
 		if outaddr == "auto" { // auto resolve target address
 			outaddr = fmt.Sprintf("%s:%d", hostname, port)
 		}
-		t = &tcpproxy.DialProxy{
-			DialTimeout:          time.Second * 10,
-			Addr:                 outaddr,
-			ProxyProtocolVersion: h.ProxyProtocolVersion,
-			DialContext:          getProxy(h.ProxyServer),
+		if isLoopUDP(outaddr) {
+			t = blackHole // avoid loopback
+		} else {
+			t = &tcpproxy.DialProxy{
+				DialTimeout:          time.Second * 10,
+				Addr:                 outaddr,
+				ProxyProtocolVersion: h.ProxyProtocolVersion,
+				DialContext:          getProxy(h.ProxyServer),
+			}
 		}
 		fastMap[hostname] = t
 		return
@@ -66,11 +70,15 @@ func (this *HostMap) matchHost(hostname string, port int) (t tcpproxy.Target, fo
 			if outaddr == "auto" { // auto resolve target address
 				outaddr = hostname + ":443"
 			}
-			t = &tcpproxy.DialProxy{
-				DialTimeout:          time.Second * 10,
-				Addr:                 outaddr,
-				ProxyProtocolVersion: h.ProxyProtocolVersion,
-				DialContext:          getProxy(h.ProxyServer),
+			if isLoopUDP(outaddr) {
+				t = blackHole // avoid loopback
+			} else {
+				t = &tcpproxy.DialProxy{
+					DialTimeout:          time.Second * 10,
+					Addr:                 outaddr,
+					ProxyProtocolVersion: h.ProxyProtocolVersion,
+					DialContext:          getProxy(h.ProxyServer),
+				}
 			}
 			fastMap[hostname] = t
 			return
@@ -84,11 +92,15 @@ func (this *HostMap) matchHost(hostname string, port int) (t tcpproxy.Target, fo
 			if outaddr == "auto" { // auto resolve target address
 				outaddr = hostname + ":443"
 			}
-			t = &tcpproxy.DialProxy{
-				DialTimeout:          time.Second * 10,
-				Addr:                 outaddr,
-				ProxyProtocolVersion: v.ProxyProtocolVersion,
-				DialContext:          getProxy(v.ProxyServer),
+			if isLoopUDP(outaddr) {
+				t = blackHole // avoid loopback
+			} else {
+				t = &tcpproxy.DialProxy{
+					DialTimeout:          time.Second * 10,
+					Addr:                 outaddr,
+					ProxyProtocolVersion: v.ProxyProtocolVersion,
+					DialContext:          getProxy(v.ProxyServer),
+				}
 			}
 			fastMap[hostname] = t
 			return
@@ -101,11 +113,15 @@ func (this *HostMap) matchHost(hostname string, port int) (t tcpproxy.Target, fo
 		if outaddr == "auto" { // auto resolve target address
 			outaddr = fmt.Sprintf("%s:%d", hostname, port)
 		}
-		t = &tcpproxy.DialProxy{
-			DialTimeout:          time.Second * 10,
-			Addr:                 outaddr,
-			ProxyProtocolVersion: h.ProxyProtocolVersion,
-			DialContext:          getProxy(h.ProxyServer),
+		if isLoopUDP(outaddr) {
+			t = blackHole // avoid loopback
+		} else {
+			t = &tcpproxy.DialProxy{
+				DialTimeout:          time.Second * 10,
+				Addr:                 outaddr,
+				ProxyProtocolVersion: h.ProxyProtocolVersion,
+				DialContext:          getProxy(h.ProxyServer),
+			}
 		}
 		fastMap[hostname] = t
 		return
