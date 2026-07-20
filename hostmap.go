@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +22,14 @@ var (
 type HostMap map[string]host
 
 func (this *HostMap) matchHost(hostname string, port int) (t tcpproxy.Target, found bool) {
+	parseTarget := func(target string) string {
+		if target[:4] == "auto" {
+			aport, _ := strconv.Atoi(target[5:])
+			return fmt.Sprintf("%s:%d", hostname, IfThen(aport > 0, aport, port))
+		}
+		return target
+	}
+
 	found = true
 	// try fast cache first
 	if func() bool {
@@ -42,10 +51,7 @@ func (this *HostMap) matchHost(hostname string, port int) (t tcpproxy.Target, fo
 	self := *this
 	if h, ok := self[hostname]; ok {
 		log.Println(hostname, "=>", h.Value)
-		outaddr := h.Value
-		if outaddr == "auto" { // auto resolve target address
-			outaddr = fmt.Sprintf("%s:%d", hostname, port)
-		}
+		outaddr := parseTarget(h.Value)
 		if isLoopUDP(outaddr) {
 			t = blackHole // avoid loopback
 		} else {
@@ -66,10 +72,8 @@ func (this *HostMap) matchHost(hostname string, port int) (t tcpproxy.Target, fo
 		wildhost := strings.Join(split, ".")
 		if h, ok := self[wildhost]; ok {
 			log.Println(wildhost, "=>", h.Value)
-			outaddr := h.Value
-			if outaddr == "auto" { // auto resolve target address
-				outaddr = hostname + ":443"
-			}
+			outaddr := parseTarget(h.Value)
+
 			if isLoopUDP(outaddr) {
 				t = blackHole // avoid loopback
 			} else {
@@ -88,10 +92,8 @@ func (this *HostMap) matchHost(hostname string, port int) (t tcpproxy.Target, fo
 	for k, v := range suffixMap {
 		if strings.HasSuffix("."+hostname, k) {
 			log.Println("."+hostname, "=>", v.Value)
-			outaddr := v.Value
-			if outaddr == "auto" { // auto resolve target address
-				outaddr = hostname + ":443"
-			}
+			outaddr := parseTarget(v.Value)
+
 			if isLoopUDP(outaddr) {
 				t = blackHole // avoid loopback
 			} else {
@@ -109,10 +111,8 @@ func (this *HostMap) matchHost(hostname string, port int) (t tcpproxy.Target, fo
 	// then catch all match
 	if h, ok := self["*"]; ok {
 		log.Println(hostname, "*=>", h.Value)
-		outaddr := h.Value
-		if outaddr == "auto" { // auto resolve target address
-			outaddr = fmt.Sprintf("%s:%d", hostname, port)
-		}
+		outaddr := parseTarget(h.Value)
+
 		if isLoopUDP(outaddr) {
 			t = blackHole // avoid loopback
 		} else {
